@@ -11,6 +11,7 @@ classdef gbcModel
         dIn
         history
         numTrain
+        samples
     end
 
     methods
@@ -39,7 +40,7 @@ classdef gbcModel
             end
 
             pred = gbcSample(obj, x_new, options.B);
-            pred = pred(:, idxSamples);
+            pred = pred(:, idxSamples)';
 
         end
     end
