@@ -195,7 +195,7 @@ for epoch = 1:opts.MaxEpochs
     end
 
     if hasVal && atCheckpoint
-        tmp = packModel(params, opts, muX, sdX, muY, sdY, d);
+        tmp = gbcModel(params, opts, muX, sdX, muY, sdY, d, [], []);
         valLog(nLogged) = gbcCRPS(gbcPredict(tmp, Xval, tauGridVal), Yval);
     end
 
@@ -222,20 +222,15 @@ history.lr        = lrLog(keep);
 history.valCRPS   = valLog(keep);
 history.trainTime = toc(t0);
 
-model = packModel(params, opts, muX, sdX, muY, sdY, d);
-model.history  = history;
-model.numTrain = n;
+model = gbcModel(params, opts, muX, sdX, muY, sdY, d, history, n);
 
 if opts.Verbose
     fprintf('Done in %.1f s.\n', history.trainTime);
 end
+
 end
 
 % =========================================================================
-function model = packModel(params, opts, muX, sdX, muY, sdY, d)
-model = struct('params',params,'opts',opts,'muX',muX,'sdX',sdX, ...
-               'muY',muY,'sdY',sdY,'dIn',d);
-end
 
 function lr = cosineAnneal(lrMax, lrMin, iter, total)
 %COSINEANNEAL Loshchilov & Hutter (2017) single-cycle cosine schedule, in the

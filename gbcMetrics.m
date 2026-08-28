@@ -19,7 +19,7 @@ function [m, Q] = gbcMetrics(model, Xtest, Ytest, level, tauGrid, crpsMethod)
 %   See also GBCMETRICSFROMSAMPLES, GBCPREDICT, GBCCRPS.
 
 arguments
-    model      {mustBeA(model,["struct","cell"])}
+    model      {mustBeA(model,["struct","cell","gbcModel"])}
     Xtest      (:,:) double
     Ytest      (:,1) double
     level      (1,1) double = 0.90

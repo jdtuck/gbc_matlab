@@ -36,7 +36,7 @@ function Q = gbcPredict(model, Xnew, tauGrid, rearrange)
 %   See also GBCTRAIN, GBCENSEMBLE, GBCSAMPLE, GBCMETRICS, GBCCRPS.
 
 arguments
-    model     {mustBeA(model,["struct","cell"])}
+    model     {mustBeA(model,["struct","cell","gbcModel"])}
     Xnew      (:,:) double
     tauGrid   (1,:) double = (1:99)/100
     rearrange (1,1) logical = true
