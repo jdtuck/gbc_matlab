@@ -1,3 +1,5 @@
+[![Pipeline Status](https://github.com/jdtuck/gbc_matlab/actions/workflows/matlab.yml/badge.svg)](https://github.com/jdtuck/gbc_matlab/actions/workflows/matlab.yml)
+
 # GBC-MATLAB — Generative Bayesian Computation surrogates
 
 A MATLAB implementation of the Implicit Quantile Network surrogate from

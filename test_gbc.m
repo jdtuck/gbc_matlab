@@ -1,4 +1,3 @@
-function results = test_gbc(runSlow)
 %TEST_GBC Verification suite for the MATLAB GBC / IQN implementation.
 %
 %   test_gbc          runs the fast checks (a few seconds).
@@ -9,7 +8,7 @@ function results = test_gbc(runSlow)
 %   a closed-form value, a brute-force evaluation, finite differences, or an
 %   analytically known conditional distribution.
 
-if nargin < 1, runSlow = false; end
+runSlow = false;
 
 addpath(fileparts(fileparts(mfilename('fullpath'))));
 rng(42);
@@ -43,7 +42,7 @@ end
 
 fprintf('\n=== %d passed, %d failed ===\n', state.pass, state.fail);
 results = state;
-end
+
 
 % =========================================================================
 % harness
