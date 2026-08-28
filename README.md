@@ -210,9 +210,3 @@ all negative produces an exactly-zero hidden vector and so an exactly-zero
 pre-activation downstream — sitting precisely on a ReLU kink. The check
 therefore draws its probe point with nonzero biases and refuses to run until
 every kink is at least 100× the step size away.
-
-I could not run MATLAB in the environment where this was written, so the code
-is unexecuted. Every mathematical identity the tests assert was verified
-numerically outside MATLAB first, and the mcycle data was verified
-element-by-element against two independent sources, so a test failure points
-at the MATLAB rather than at a bad expectation.
