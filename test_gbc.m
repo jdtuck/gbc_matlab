@@ -8,7 +8,7 @@
 %   a closed-form value, a brute-force evaluation, finite differences, or an
 %   analytically known conditional distribution.
 
-runSlow = false;
+runSlow = true;
 
 addpath(fileparts(fileparts(mfilename('fullpath'))));
 rng(42);
@@ -31,6 +31,8 @@ state = check(state, 'architecture: tanh bottleneck present',     @t_bottleneck)
 state = check(state, 'CRPS: permuted estimator tracks exact',     @t_crps_methods);
 state = check(state, 'metrics: quantiles match numpy linear rule',@t_rowquantile);
 state = check(state, 'ensemble: pooled shape and ordering',       @t_ensemble);
+state = check(state, 'gbcQuantile: one column per requested level',@t_quantile);
+state = check(state, 'coverage: grid span correction is exact',   @t_spancorrect);
 state = check(state, 'predict: column order preserved',           @t_colorder);
 state = check(state, 'train: reproducible under a fixed seed',    @t_seed);
 
@@ -42,7 +44,6 @@ end
 
 fprintf('\n=== %d passed, %d failed ===\n', state.pass, state.fail);
 results = state;
-
 
 % =========================================================================
 % harness
@@ -477,6 +478,93 @@ m = gbcMetricsFromSamples(S, Y(1:7), 0.90);
 assertTrue(isfinite(m.CRPS) && isfinite(m.RMSE), 'ensemble metrics not finite');
 
 msg = 'pooled 3x20 -> 60 columns, sorted, members distinct';
+end
+
+% -------------------------------------------------------------------------
+function msg = t_quantile()
+% Regression test for a real bug: gbcPredict on an ENSEMBLE pools every
+% member's columns, so asking it for k levels returns K*k sorted columns and
+% column j is not level j. Plotting code that read Q(:,5) as the 95% level
+% drew a band spanning roughly the 4th to the 25th percentile. gbcQuantile
+% must return exactly one column per requested level, for both cases.
+X = rand(50,2); Y = X*[1;-1] + 0.3*randn(50,1);
+% Train briefly but enough for the quantile curve to spread, so the last
+% assertion below is testing column semantics and not a degenerate flat fit.
+o = gbcOptions('MaxEpochs',300,'HiddenSize',32,'BottleneckSize',8, ...
+               'TauPerExample',true,'Verbose',false);
+
+probs = [0.05 0.25 0.5 0.75 0.95];
+Xq    = X(1:9,:);
+
+% single model: must agree with gbcPredict exactly
+o1 = o; o1.Seed = 4;
+single1 = gbcTrain(X, Y, o1);
+Qq = gbcQuantile(single1, Xq, probs);
+Qp = gbcPredict(single1, Xq, probs);
+assertTrue(isequal(size(Qq),[9 5]), 'single-model gbcQuantile returned %s', ...
+           mat2str(size(Qq)));
+assertTrue(max(abs(Qq(:)-Qp(:))) < 1e-12, ...
+           'single-model gbcQuantile disagrees with gbcPredict');
+
+% ensemble: gbcQuantile keeps the shape, gbcPredict deliberately does not
+K = 3;
+models = gbcEnsemble(X, Y, K, o, [7 8 9]);
+Qe = gbcQuantile(models, Xq, probs);
+assertTrue(isequal(size(Qe),[9 5]), ...
+    'ensemble gbcQuantile returned %s, expected 9-by-5', mat2str(size(Qe)));
+assertTrue(all(all(diff(Qe,1,2) >= -1e-12)), ...
+    'quantiles are not nondecreasing across levels');
+
+Qpe = gbcPredict(models, Xq, probs);
+assertTrue(isequal(size(Qpe),[9 K*5]), ...
+    'gbcPredict on an ensemble should pool to %d columns, got %s', ...
+    K*5, mat2str(size(Qpe)));
+
+% The bug in one assertion: the pooled column 5 is far below the real 95%.
+assertTrue(mean(Qpe(:,5)) < mean(Qe(:,5)) - 1e-9, ...
+    'pooled column 5 should sit well below the true 95%% level');
+
+msg = sprintf('single exact; ensemble 9x5 vs pooled 9x%d', K*5);
+end
+
+% -------------------------------------------------------------------------
+function msg = t_spancorrect()
+% A sample built from a quantile GRID spanning [a,b] has its empirical
+% p-quantile at level a + p*(b-a). With the reference grid
+% linspace(0.005,0.995,B) that turns a nominal 90% interval into 89.1%, and
+% the error is affine so refining B does not help. Verified analytically:
+% feed exact N(0,1) quantiles and check the realised coverage both ways.
+rng(21);
+nObs = 10000;
+B    = 100;
+grid = linspace(0.005, 0.995, B);
+
+qz = sqrt(2)*erfinv(2*grid - 1);        % exact standard-normal quantiles
+S  = repmat(qz, nObs, 1);
+yv = randn(nObs,1);
+
+mRaw  = gbcMetricsFromSamples(S, yv, 0.90);
+mCorr = gbcMetricsFromSamples(S, yv, 0.90, "exact", [grid(1) grid(end)]);
+
+% Corrected width must equal the true 90% width of N(0,1).
+trueWidth = 2*sqrt(2)*erfinv(2*0.95 - 1);
+assertTrue(abs(mCorr.Width - trueWidth) < 0.02, ...
+    'corrected width %.4f, expected %.4f', mCorr.Width, trueWidth);
+
+% Uncorrected width must be the narrower 89.1% one.
+narrowWidth = 2*sqrt(2)*erfinv(2*0.9455 - 1);
+assertTrue(abs(mRaw.Width - narrowWidth) < 0.02, ...
+    'uncorrected width %.4f, expected %.4f', mRaw.Width, narrowWidth);
+
+% And that shows up as realised coverage. SE at n = 10000 is ~0.003.
+assertTrue(abs(mCorr.Coverage - 0.90) < 0.012, ...
+    'corrected coverage %.4f, expected 0.90', mCorr.Coverage);
+assertTrue(mRaw.Coverage < mCorr.Coverage, ...
+    'uncorrected coverage (%.4f) should be below corrected (%.4f)', ...
+    mRaw.Coverage, mCorr.Coverage);
+
+msg = sprintf('coverage %.4f raw vs %.4f corrected (target 0.90)', ...
+              mRaw.Coverage, mCorr.Coverage);
 end
 
 % -------------------------------------------------------------------------

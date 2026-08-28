@@ -27,7 +27,7 @@ function S = gbcSample(model, Xnew, B)
 %   members draws B samples and the results are pooled, giving n-by-(K*B).
 
 arguments
-    model {mustBeA(model,["struct","cell"])}
+    model {mustBeA(model,["struct","cell","gbcModel"])}
     Xnew  (:,:) double
     B     (1,1) double {mustBePositive, mustBeInteger} = 200
 end

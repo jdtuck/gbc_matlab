@@ -59,7 +59,7 @@ fprintf('90%% coverage       : %.3f   (nominal 0.900)\n', m.Coverage);
 fprintf('90%% mean width     : %.4f   (oracle %.4f)\n', m.Width, 2*1.6449*sigma);
 
 %% ---------------------------------------------------------------- plots
-Q = gbcPredict(model, Xte, [0.05 0.5 0.95]);
+Q = gbcQuantile(model, Xte, [0.05 0.5 0.95]);
 
 figure('Name','GBC - Friedman 10D','Position',[100 100 1100 760]);
 
@@ -90,7 +90,7 @@ xlabel('epoch'); ylabel('loss'); title('Training loss'); grid on;
 subplot(2,2,4);
 g   = linspace(0,1,200).';
 Xg  = [g, repmat(0.5, numel(g), d-1)];
-Qg  = gbcPredict(model, Xg, [0.05 0.25 0.5 0.75 0.95]);
+Qg  = gbcQuantile(model, Xg, [0.05 0.25 0.5 0.75 0.95]);
 fill([g; flipud(g)], [Qg(:,1); flipud(Qg(:,5))], [0.75 0.83 0.92], ...
      'EdgeColor','none'); hold on;
 fill([g; flipud(g)], [Qg(:,2); flipud(Qg(:,4))], [0.55 0.68 0.85], ...

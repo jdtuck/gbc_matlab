@@ -68,7 +68,9 @@ test_gbc(true)      % plus the end-to-end calibration test
 | `gbcLoss.m` | The three-term composite loss, Eq. (1) |
 | `gbcTrain.m` | Algorithm 1, training phase: Adam + cosine annealing |
 | `gbcEnsemble.m` | K independent fits whose quantiles pool at test time |
-| `gbcPredict.m` | Conditional quantiles; accepts a single model or an ensemble |
+| `gbcPredict.m` | Quantiles on a grid; pools columns for an ensemble |
+| `gbcQuantile.m` | **Quantiles at the levels you asked for** — use this for plots and intervals |
+| `gbcRowQuantile.m` | numpy-compatible empirical row quantile |
 | `gbcSample.m` | Algorithm 1, test phase: τ ~ U[0,1] → predictive draws |
 | `gbcCRPS.m` | CRPS, exact pairwise or the reference's permuted estimator |
 | `gbcMetricsFromSamples.m` | RMSE / CRPS / coverage / width / PIT from samples |
@@ -159,6 +161,30 @@ Three things here address that:
   epoch would otherwise land on every step. `history` is therefore recorded at
   checkpoints only, with `history.epoch` holding the epochs it covers.
 
+## Two traps around predictive intervals
+
+Both of these bit this code, so they are worth stating plainly.
+
+**`gbcPredict` vs `gbcQuantile`.** For a single model, `gbcPredict(model, X,
+probs)` returns one column per level. For an **ensemble** it pools every
+member's columns and sorts them, so the same call across K = 3 members returns
+15 columns and column 5 is not the 95% level — it lands near the 25th
+percentile. Plotting code that assumed the single-model layout drew a "90%
+band" that actually spanned about 4% to 25% and missed most of the data.
+**Use `gbcQuantile` whenever you want specific levels**; it returns one column
+per level for both cases, querying the network directly for a single model and
+taking the mixture quantile for an ensemble.
+
+**Empirical quantiles of a quantile grid.** If a "sample" is really the
+network evaluated on a grid spanning [a, b], then its empirical p-quantile
+sits at level a + p·(b − a), not p. The reference's grid is
+`linspace(0.005, 0.995, B)`, so `np.quantile(samples, 0.05)` lands at τ =
+0.0545 and `0.95` at τ = 0.9455 — a **89.1% interval reported as 90%**, about
+0.9 points of coverage. The distortion is affine, so raising B does not fix
+it. `gbcMetricsFromSamples` takes an optional `tauSpan` argument that undoes
+it exactly; `gbcMetrics` passes it automatically. Omit it to reproduce the
+reference's numbers as published.
+
 ## Choices that are mine, not the paper's or the code's
 
 - **Quantile rearrangement.** `gbcPredict` sorts each row's quantiles by
@@ -210,3 +236,4 @@ all negative produces an exactly-zero hidden vector and so an exactly-zero
 pre-activation downstream — sitting precisely on a ReLU kink. The check
 therefore draws its probe point with nonzero biases and refuses to run until
 every kink is at least 100× the step size away.
+

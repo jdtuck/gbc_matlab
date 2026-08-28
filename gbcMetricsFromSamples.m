@@ -1,41 +1,46 @@
-function m = gbcMetricsFromSamples(S, y, level, crpsMethod)
+function m = gbcMetricsFromSamples(S, y, level, crpsMethod, tauSpan)
 %GBCMETRICSFROMSAMPLES Accuracy, calibration and sharpness from a predictive
 %   sample matrix.
 %
-%   m = GBCMETRICSFROMSAMPLES(S,y) treats each row of S as a set of draws from
-%   the predictive distribution of the corresponding element of y, and reports
-%   the metrics the paper uses. This is the form the reference implementation
-%   evaluates: it takes empirical quantiles of the pooled samples rather than
-%   querying the network at specific tau levels, which is what an ensemble
-%   requires anyway.
+%   m = GBCMETRICSFROMSAMPLES(S,y) treats each row of S as draws from the
+%   predictive distribution of the corresponding element of y and reports the
+%   metrics the paper uses.
 %
 %   m = GBCMETRICSFROMSAMPLES(S,y,level) sets the nominal interval level
 %   (default 0.90).
 %
 %   m = GBCMETRICSFROMSAMPLES(S,y,level,"permuted") uses the reference's
-%   single-permutation CRPS estimator instead of the exact pairwise one. See
-%   GBCCRPS for what differs.
+%   single-permutation CRPS estimator instead of the exact pairwise one.
+%
+%   m = GBCMETRICSFROMSAMPLES(S,y,level,crpsMethod,tauSpan) corrects for the
+%   grid the samples came from. IMPORTANT when S holds evaluated QUANTILES
+%   rather than random draws: if the columns are the network's output at
+%   levels spanning [a,b], then a raw empirical p-quantile of S lands at level
+%   a + p*(b-a), not p. Pass tauSpan = [a b] and the interval endpoints are
+%   taken at the preimage instead.
+%
+%   With the reference's grid, linspace(0.005,0.995,B), the uncorrected
+%   endpoints sit at 0.0545 and 0.9455 - a 89.1% interval reported as 90%,
+%   costing about 0.9 points of coverage. The distortion is affine, so it does
+%   not shrink as B grows. Omit tauSpan to reproduce the reference's numbers
+%   exactly; pass it to get the level you actually asked for.
 %
 %   Inputs
-%     S : n-by-B matrix of predictive draws (or quantiles).
-%     y : n-by-1 vector of observed responses.
+%     S       : n-by-B matrix of predictive draws or quantiles.
+%     y       : n-by-1 observed responses.
+%     tauSpan : [a b] span of the generating grid, or [] for none.
 %
 %   Output fields
-%     RMSE      root mean squared error of the predictive median
-%     MAE       mean absolute error of the predictive median
-%     CRPS      mean continuous ranked probability score
-%     Coverage  fraction of y inside the nominal interval
-%     Width     mean width of that interval
-%     Level     the nominal level used
-%     PIT       n-by-1 probability integral transform values
+%     RMSE, MAE, CRPS, Coverage, Width, Level, PIT
 %
-%   See also GBCMETRICS, GBCCRPS, GBCENSEMBLE.
+%   See also GBCMETRICS, GBCQUANTILE, GBCCRPS, GBCROWQUANTILE.
 
 arguments
     S          (:,:) double
     y          (:,1) double
     level      (1,1) double = 0.90
     crpsMethod (1,1) string = "exact"
+    tauSpan    (1,:) double = []
 end
 
 if size(S,1) ~= numel(y)
@@ -45,14 +50,26 @@ end
 if level <= 0 || level >= 1
     error('gbcMetricsFromSamples:BadLevel','level must lie strictly in (0,1).');
 end
+if ~isempty(tauSpan) && numel(tauSpan) ~= 2
+    error('gbcMetricsFromSamples:BadSpan','tauSpan must be [a b] or empty.');
+end
 
 lo = (1-level)/2;
 hi = 1 - lo;
+p  = [lo 0.5 hi];
+
+if ~isempty(tauSpan)
+    a = tauSpan(1); b = tauSpan(2);
+    if b <= a
+        error('gbcMetricsFromSamples:BadSpan','tauSpan must satisfy b > a.');
+    end
+    p = min(1, max(0, (p - a) ./ (b - a)));
+end
 
 Ss  = sort(S, 2);
-med = rowQuantile(Ss, 0.5);
-qLo = rowQuantile(Ss, lo);
-qHi = rowQuantile(Ss, hi);
+qLo = gbcRowQuantile(Ss, p(1));
+med = gbcRowQuantile(Ss, p(2));
+qHi = gbcRowQuantile(Ss, p(3));
 
 resid = y - med;
 
@@ -63,17 +80,4 @@ m.Coverage = mean(y >= qLo & y <= qHi);
 m.Width    = mean(qHi - qLo);
 m.Level    = level;
 m.PIT      = mean(S <= y, 2);
-end
-
-% -------------------------------------------------------------------------
-function v = rowQuantile(Ss, p)
-%ROWQUANTILE Linear-interpolation quantile of each row of an already-sorted
-%   matrix. Matches numpy.quantile's default ('linear') method, which is what
-%   the reference uses, and avoids a Statistics Toolbox dependency.
-B = size(Ss,2);
-pos = p*(B-1) + 1;                 % 1-based fractional position
-loI = floor(pos);
-hiI = min(loI+1, B);
-frac = pos - loI;
-v = (1-frac)*Ss(:,loI) + frac*Ss(:,hiI);
 end

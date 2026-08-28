@@ -94,7 +94,10 @@ for rep = 1:NREP
     models = gbcEnsemble(t(tr), y(tr), K, opts, seeds);
 
     S = gbcPredict(models, t(te), tauGrid);   % n_test-by-(K*BPER) pooled
-    m = gbcMetricsFromSamples(S, y(te), 0.90);
+    % Pass the grid span: without it the "90%" endpoints would silently be
+    % taken at tau 0.0545 / 0.9455, an 89.1% interval.
+    m = gbcMetricsFromSamples(S, y(te), 0.90, "exact", ...
+                              [tauGrid(1) tauGrid(end)]);
 
     rmseAll(rep) = m.RMSE;
     crpsAll(rep) = m.CRPS;
@@ -129,7 +132,19 @@ fprintf('\nFitting a display ensemble on all %d points...\n', n);
 final = gbcEnsemble(t, y, K, opts, 900 + (1:K)*7);
 
 tg = linspace(min(t), max(t), 400).';
-Q  = gbcPredict(final, tg, [0.05 0.25 0.5 0.75 0.95]);
+
+% gbcQuantile, NOT gbcPredict. For an ensemble, gbcPredict pools every
+% member's columns, so a 5-level request across K members returns K*5 sorted
+% columns and Q(:,5) is not the 95% level - it lands around the 25th
+% percentile, which draws a "90% band" that misses most of the data.
+% gbcQuantile returns one column per requested level for both cases.
+Q = gbcQuantile(final, tg, [0.05 0.25 0.5 0.75 0.95]);
+
+% Sanity check the band we are about to draw, rather than trusting the plot.
+Qobs = gbcQuantile(final, t, [0.05 0.95]);
+bandCover = mean(y >= Qobs(:,1) & y <= Qobs(:,2));
+fprintf('plotted 90%% band covers %.1f%% of the %d observations (in-sample)\n', ...
+        100*bandCover, n);
 
 figure('Name','GBC - motorcycle crash','Position',[80 80 1150 780]);
 

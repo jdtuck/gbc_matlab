@@ -19,7 +19,7 @@ function [m, Q] = gbcMetrics(model, Xtest, Ytest, level, tauGrid, crpsMethod)
 %   See also GBCMETRICSFROMSAMPLES, GBCPREDICT, GBCCRPS.
 
 arguments
-    model      {mustBeA(model,["struct","cell"])}
+    model      {mustBeA(model,["struct","cell", "gbcModel"])}
     Xtest      (:,:) double
     Ytest      (:,1) double
     level      (1,1) double = 0.90
@@ -28,5 +28,10 @@ arguments
 end
 
 Q = gbcPredict(model, Xtest, tauGrid);
-m = gbcMetricsFromSamples(Q, Ytest, level, crpsMethod);
+
+% Tell the scorer which grid the columns came from, so the interval endpoints
+% land on the level actually requested rather than on the grid's affine
+% remapping of it.
+m = gbcMetricsFromSamples(Q, Ytest, level, crpsMethod, ...
+                          [min(tauGrid) max(tauGrid)]);
 end

@@ -100,7 +100,7 @@ xlabel('x_1'); ylabel('x_2');
 ng = 90;
 [g1,g2] = meshgrid(linspace(-0.5,0.5,ng));
 Xg = [g1(:) g2(:)];
-Qg = gbcPredict(model, Xg, [0.05 0.5 0.95]);
+Qg = gbcQuantile(model, Xg, [0.05 0.5 0.95]);
 
 subplot(2,3,2);
 imagesc(linspace(-0.5,0.5,ng), linspace(-0.5,0.5,ng), reshape(Qg(:,2),ng,ng));
