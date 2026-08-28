@@ -89,9 +89,14 @@ end
 nBatch    = max(1, ceil(n/batch));
 totalIter = opts.MaxEpochs * nBatch;
 
-lossLog = zeros(opts.MaxEpochs,4);
-lrLog   = zeros(opts.MaxEpochs,1);
-valLog  = nan(opts.MaxEpochs,1);
+% History is recorded only on checkpoint epochs, so these are sized by the
+% number of checkpoints rather than by MaxEpochs.
+nCheck   = numel(unique([1, opts.VerboseFreq:opts.VerboseFreq:opts.MaxEpochs, ...
+                         opts.MaxEpochs]));
+lossLog  = nan(nCheck,4);
+lrLog    = nan(nCheck,1);
+valLog   = nan(nCheck,1);
+epochLog = nan(nCheck,1);
 
 hasVal = ~isempty(opts.ValidationData);
 if hasVal
@@ -110,14 +115,27 @@ if opts.Verbose
         'epoch','loss','anchor','order','pinball','lr');
 end
 
+% In full-batch mode every step sees exactly the same X and Y, so building
+% the dlarray inside the loop would rebuild an identical object thousands of
+% times. Hoist it.
+fullBatch = (nBatch == 1);
+if fullBatch
+    XbFixed = dlarray(Xall, 'CB');
+    YbFixed = Yall;
+end
+
 iter = 0;
+nLogged = 0;
 t0 = tic;
 for epoch = 1:opts.MaxEpochs
+
+    atCheckpoint = mod(epoch, opts.VerboseFreq) == 0 || epoch == 1 || ...
+                   epoch == opts.MaxEpochs;
 
     if nBatch > 1
         idx = randperm(n);
     else
-        idx = 1:n;              % full batch: no shuffling needed
+        idx = [];               % full batch: no shuffling needed
     end
     epochParts = zeros(1,3);
     epochLoss  = 0;
@@ -125,10 +143,14 @@ for epoch = 1:opts.MaxEpochs
     for b = 1:nBatch
         iter = iter + 1;
 
-        sel = idx((b-1)*batch + 1 : min(b*batch, n));
-        nb  = numel(sel);
-        Xb  = dlarray(Xall(:,sel), 'CB');
-        Yb  = Yall(:,sel);
+        if fullBatch
+            Xb = XbFixed;  Yb = YbFixed;  nb = n;
+        else
+            sel = idx((b-1)*batch + 1 : min(b*batch, n));
+            nb  = numel(sel);
+            Xb  = dlarray(Xall(:,sel), 'CB');
+            Yb  = Yall(:,sel);
+        end
 
         % Reference: one tau per gradient step, shared across the batch.
         % Optional: an independent tau per example.
@@ -140,8 +162,17 @@ for epoch = 1:opts.MaxEpochs
         if useGPU, tau = gpuArray(tau); end
         Phi = dlarray(quantileEmbedding(tau, nh), 'CB');
 
-        [lossVal, grads, parts] = dlfeval(@gbcLoss, params, Xb, Phi, tau, ...
-                                          Yb, w, 0);
+        % Only ask for the loss value and its breakdown on epochs we actually
+        % record. Each extractdata forces a copy (and a device sync on GPU),
+        % and at one gradient step per epoch that cost lands on every step.
+        if atCheckpoint
+            [lossVal, grads, parts] = dlfeval(@gbcLoss, params, Xb, Phi, ...
+                                              tau, Yb, w, 0);
+            epochLoss  = epochLoss  + gather(double(extractdata(lossVal)));
+            epochParts = epochParts + parts;
+        else
+            [~, grads] = dlfeval(@gbcLoss, params, Xb, Phi, tau, Yb, w, 0);
+        end
 
         % Adam weight decay exactly as torch.optim.Adam applies it: added to
         % the gradient of every parameter, biases included. (This is the
@@ -154,42 +185,41 @@ for epoch = 1:opts.MaxEpochs
 
         [params, avgG, avgSqG] = adamupdate(params, grads, avgG, avgSqG, ...
             iter, lr, opts.GradientDecay, opts.SqGradDecay);
-
-        epochLoss  = epochLoss  + gather(double(extractdata(lossVal)));
-        epochParts = epochParts + parts;
     end
 
-    lossLog(epoch,:) = [epochLoss, epochParts] / nBatch;
-    lrLog(epoch)     = lr;
-
-    atCheckpoint = mod(epoch, opts.VerboseFreq) == 0 || epoch == 1 || ...
-                   epoch == opts.MaxEpochs;
+    if atCheckpoint
+        nLogged = nLogged + 1;
+        lossLog(nLogged,:) = [epochLoss, epochParts] / nBatch;
+        lrLog(nLogged)     = lr;
+        epochLog(nLogged)  = epoch; %#ok<AGROW>
+    end
 
     if hasVal && atCheckpoint
         tmp = packModel(params, opts, muX, sdX, muY, sdY, d);
-        valLog(epoch) = gbcCRPS(gbcPredict(tmp, Xval, tauGridVal), Yval);
+        valLog(nLogged) = gbcCRPS(gbcPredict(tmp, Xval, tauGridVal), Yval);
     end
 
     if opts.Verbose && atCheckpoint
         if hasVal
             fprintf('%8d %12.5f %10.4f %10.4f %10.4f %10.2e   valCRPS %.4f\n', ...
-                epoch, lossLog(epoch,1), lossLog(epoch,2), lossLog(epoch,3), ...
-                lossLog(epoch,4), lr, valLog(epoch));
+                epoch, lossLog(nLogged,1), lossLog(nLogged,2), ...
+                lossLog(nLogged,3), lossLog(nLogged,4), lr, valLog(nLogged));
         else
             fprintf('%8d %12.5f %10.4f %10.4f %10.4f %10.2e\n', ...
-                epoch, lossLog(epoch,1), lossLog(epoch,2), lossLog(epoch,3), ...
-                lossLog(epoch,4), lr);
+                epoch, lossLog(nLogged,1), lossLog(nLogged,2), ...
+                lossLog(nLogged,3), lossLog(nLogged,4), lr);
         end
     end
 end
 
-history.epoch     = (1:opts.MaxEpochs).';
-history.loss      = lossLog(:,1);
-history.anchor    = lossLog(:,2);
-history.ordering  = lossLog(:,3);
-history.pinball   = lossLog(:,4);
-history.lr        = lrLog;
-history.valCRPS   = valLog;
+keep = 1:nLogged;
+history.epoch     = epochLog(keep);
+history.loss      = lossLog(keep,1);
+history.anchor    = lossLog(keep,2);
+history.ordering  = lossLog(keep,3);
+history.pinball   = lossLog(keep,4);
+history.lr        = lrLog(keep);
+history.valCRPS   = valLog(keep);
 history.trainTime = toc(t0);
 
 model = packModel(params, opts, muX, sdX, muY, sdY, d);

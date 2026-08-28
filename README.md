@@ -127,6 +127,36 @@ gradient steps than "3000 epochs" suggests: 3000 steps total, each seeing one
 stochastic, so the paper's CRPS values carry a little noise that the exact
 estimator here does not.
 
+## Performance
+
+The reference recipe is expensive by construction, and it is worth
+understanding why before reaching for a smaller model. Training is full-batch
+with **one gradient step per "epoch"**, and each step draws **one** τ shared
+across the whole batch. So "5000 epochs" is 5000 steps that between them visit
+only 5000 quantile levels. The paper's Table 1 multiplies that by 5 ensemble
+members and 50 replicates: 1.25M steps, which the authors quote at ~30 minutes
+in PyTorch. MATLAB's per-call `dlfeval` overhead makes it slower still, and on
+a problem this small (n = 106, d = 1) that overhead, not arithmetic, is the
+binding constraint.
+
+Three things here address that:
+
+- **`TauPerExample = true`** draws an independent τ for every training point,
+  so a single step visits ~n levels instead of 1. On mcycle that is ~106×
+  better quantile coverage per step, and far fewer steps resolve the same
+  curve. This departs from the reference protocol — same model, same loss,
+  different τ sampling — so use it for exploration and turn it off to match
+  published numbers. `demo_motorcycle`'s `"fast"` preset uses it.
+- **Batched prediction.** `gbcPredict` and `gbcSample` evaluate a whole block
+  of quantile levels in one forward pass by tiling test points across levels,
+  rather than looping. Block size is capped to bound activation memory.
+- **Cheap training loop.** Loop invariants are hoisted (in full-batch mode the
+  input `dlarray` is built once, not once per step), and the loss value and
+  its three-term breakdown are only extracted on epochs that get recorded —
+  each `extractdata` is a copy and, on GPU, a sync, which at one step per
+  epoch would otherwise land on every step. `history` is therefore recorded at
+  checkpoints only, with `history.epoch` holding the epochs it covers.
+
 ## Choices that are mine, not the paper's or the code's
 
 - **Quantile rearrangement.** `gbcPredict` sorts each row's quantiles by

@@ -52,18 +52,29 @@ onGPU = false;
 try, onGPU = isgpuarray(extractdata(model.params.Wx)); catch, end
 
 Xs = (Xnew - model.muX) ./ model.sdX;
-Xd = single(Xs.');
-if onGPU, Xd = gpuArray(Xd); end
-Xd = dlarray(Xd,'CB');
+X0 = single(Xs.');                        % d-by-n
+if onGPU, X0 = gpuArray(X0); end
+
+% Draws are batched the same way GBCPREDICT batches quantile levels: tile the
+% test points across draws so one forward pass yields many samples.
+maxCols = max(1000, round(5e6 / max(1, model.opts.HiddenSize)));
+T       = max(1, min(B, floor(maxCols / max(1,n))));
 
 S = zeros(n, B);
-for b = 1:B
-    tau = rand(1, n, 'single');
-    if onGPU, tau = gpuArray(tau); end
-    Phi = dlarray(quantileEmbedding(tau, nh), 'CB');
+for s = 1:T:B
+    blk = s:min(s+T-1, B);
+    nb  = numel(blk);
+
+    Xrep = repmat(X0, 1, nb);
+    tRep = rand(1, n*nb, 'single');        % independent tau per (point, draw)
+    if onGPU, tRep = gpuArray(tRep); end
+
+    Xd  = dlarray(Xrep, 'CB');
+    Phi = dlarray(quantileEmbedding(tRep, nh), 'CB');
 
     [~, qHat] = gbcForward(model.params, Xd, Phi);
-    S(:,b) = gather(double(extractdata(qHat))).';
+
+    S(:,blk) = reshape(gather(double(extractdata(qHat))), n, nb);
 end
 
 S = S * model.sdY + model.muY;

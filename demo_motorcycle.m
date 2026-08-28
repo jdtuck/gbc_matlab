@@ -13,34 +13,56 @@
 % quantile function, so changing spread is just a change in the spacing of
 % the quantile curves - no separate noise process, no kernel for it.
 %
-% PROTOCOL (from experiments/tab1_motorcycle.py in the authors' repo):
-%   - 50 random 80/20 train/test splits, split seed = rep + 300
-%   - K = 5 ensemble per replicate, member seeds rep*13 + k*1000
-%   - 5000 training steps per member
-%   - 100 quantiles per member -> 500 pooled samples per test point
-%   - report mean +/- standard error across replicates
+%% Two presets
 %
-% This script defaults to 5 replicates so it finishes in a few minutes. Set
-% NREP = 50 to run the paper's full table (expect ~30-60 min on CPU).
+% PRESET = "paper" reproduces experiments/tab1_motorcycle.py exactly:
+%   50 splits x 5 ensemble members x 5000 full-batch steps = 1.25M steps.
+%   That is genuinely expensive - the authors quote ~30 min for this table,
+%   and MATLAB's per-call dlfeval overhead makes it slower still. Use it when
+%   you want the table, not when you want to see the method work.
 %
-% NOTE ON EXACT REPRODUCTION: the replicate splits come from MATLAB's RNG, not
-% numpy's, so individual replicate numbers will not match the paper even with
-% the same nominal seeds. The aggregate should be comparable.
+% PRESET = "fast" (default) costs a small fraction of that and gives a
+%   visually identical fit. The saving is not just "fewer steps": the
+%   reference draws ONE tau per gradient step and shares it across the batch,
+%   so 5000 steps only ever visit 5000 quantile levels. Setting
+%   TauPerExample = true draws an independent tau for every training point,
+%   so each step visits ~106 levels instead of 1. Quantile coverage per step
+%   goes up by about two orders of magnitude, and far fewer steps are needed
+%   to resolve the same curve.
+%
+%   This is a deliberate departure from the reference protocol. The model,
+%   the loss and the data are identical; only the tau sampling and the step
+%   count change. Numbers will differ slightly from the paper's. Use "paper"
+%   if you need to match it.
+%
+% NOTE ON EXACT REPRODUCTION: even under "paper", replicate splits come from
+% MATLAB's RNG rather than numpy's, so individual replicate numbers will not
+% match the paper. The aggregate should be comparable.
 
 clear; close all;
 addpath(fileparts(fileparts(mfilename('fullpath'))));
 
-NREP   = 5;        % paper: 50
-K      = 5;        % ensemble members per replicate
-EPOCHS = 5000;     % paper: 5000
-BPER   = 100;      % quantiles per member -> K*BPER pooled samples
+PRESET = "fast";       % "fast" | "paper"
+
+switch PRESET
+    case "fast"
+        NREP = 5; K = 3; EPOCHS = 1200; BPER = 100; PEREX = true;
+    case "paper"
+        NREP = 50; K = 5; EPOCHS = 5000; BPER = 100; PEREX = false;
+    otherwise
+        error('demo_motorcycle:BadPreset','PRESET must be "fast" or "paper".');
+end
 
 %% ---------------------------------------------------------------- data
 [t, y] = mcycleData();
 n = numel(t);
 
-fprintf('mcycle: n = %d, times %.1f-%.1f ms, accel %.1f to %.1f g\n\n', ...
+fprintf('mcycle: n = %d, times %.1f-%.1f ms, accel %.1f to %.1f g\n', ...
         n, min(t), max(t), min(y), max(y));
+fprintf('preset "%s": %d replicates x %d members x %d steps = %s gradient steps\n', ...
+        PRESET, NREP, K, EPOCHS, addCommas(NREP*K*EPOCHS));
+fprintf('tau sampling: %s\n\n', ...
+        ternary(PEREX,'independent per training point','one per step (reference)'));
 
 %% ---------------------------------------------------------------- replicates
 tauGrid = linspace(0.005, 0.995, BPER);   % the reference's sampling grid
@@ -52,11 +74,13 @@ widAll  = zeros(NREP,1);
 pitAll  = [];
 
 opts = gbcOptions( ...
-    'MaxEpochs',   EPOCHS, ...
-    'LossWeights', [0.3 0.3 0.4], ...   % smooth/heteroskedastic defaults
-    'Verbose',     false);
+    'MaxEpochs',     EPOCHS, ...
+    'TauPerExample', PEREX, ...
+    'LossWeights',   [0.3 0.3 0.4], ...   % smooth/heteroskedastic defaults
+    'Verbose',       false);
 
-fprintf('%5s %10s %10s %10s %10s\n','rep','RMSE','CRPS','cover90','width90');
+fprintf('%5s %10s %10s %10s %10s %12s\n', ...
+        'rep','RMSE','CRPS','cover90','width90','elapsed');
 tStart = tic;
 for rep = 1:NREP
 
@@ -78,8 +102,16 @@ for rep = 1:NREP
     widAll(rep)  = m.Width;
     pitAll       = [pitAll; m.PIT]; %#ok<AGROW>
 
-    fprintf('%5d %10.3f %10.3f %10.3f %10.2f\n', ...
-            rep, m.RMSE, m.CRPS, m.Coverage, m.Width);
+    el = toc(tStart);
+    fprintf('%5d %10.3f %10.3f %10.3f %10.2f %9.1f s\n', ...
+            rep, m.RMSE, m.CRPS, m.Coverage, m.Width, el);
+
+    % Project the total after the first replicate, so a long run announces
+    % its cost early instead of going quiet.
+    if rep == 1 && NREP > 1
+        fprintf('      (~%.1f s per replicate; ~%.1f min for all %d)\n', ...
+                el, el*NREP/60, NREP);
+    end
 end
 elapsed = toc(tStart);
 
@@ -94,9 +126,7 @@ fprintf('(%.1f s total, %.1f s per replicate)\n', elapsed, elapsed/NREP);
 %% ---------------------------------------------------------------- full fit
 % One ensemble on all 133 points, purely for the picture.
 fprintf('\nFitting a display ensemble on all %d points...\n', n);
-finalOpts = opts;
-finalOpts.Verbose = false;
-final = gbcEnsemble(t, y, K, finalOpts, 900 + (1:K)*7);
+final = gbcEnsemble(t, y, K, opts, 900 + (1:K)*7);
 
 tg = linspace(min(t), max(t), 400).';
 Q  = gbcPredict(final, tg, [0.05 0.25 0.5 0.75 0.95]);
@@ -145,4 +175,12 @@ function s = stderr(v)
 % Standard error with the population SD, matching the reference's
 % np.nanstd(a)/sqrt(n).
 s = std(v,1) / sqrt(numel(v));
+end
+
+function s = addCommas(x)
+s = regexprep(sprintf('%d',round(x)), '(\d)(?=(\d{3})+$)', '$1,');
+end
+
+function out = ternary(c,a,b)
+if c, out = a; else, out = b; end
 end

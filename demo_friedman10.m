@@ -78,9 +78,11 @@ hold on; yline(1,'k--','LineWidth',1.2);
 xlabel('PIT'); ylabel('density');
 title('Rank histogram (flat = calibrated)');
 
+% history is recorded at checkpoints only (see README, "Performance"), so
+% these are short vectors rather than one point per epoch.
 subplot(2,2,3);
-semilogy(model.history.epoch, model.history.loss, 'LineWidth',1.2); hold on;
-semilogy(model.history.epoch, model.history.pinball, 'LineWidth',1);
+semilogy(model.history.epoch, model.history.loss, '.-', 'LineWidth',1.2); hold on;
+semilogy(model.history.epoch, model.history.pinball, '.-', 'LineWidth',1);
 legend({'total','pinball term'},'Location','northeast');
 xlabel('epoch'); ylabel('loss'); title('Training loss'); grid on;
 
