@@ -3,7 +3,8 @@ function model = gbcTrain(X, Y, opts)
 %
 %   model = GBCTRAIN(X,Y) trains an Implicit Quantile Network on the
 %   input/output pairs of an expensive computer experiment, following
-%   Algorithm 1 of Polson & Sokolov (2026), arXiv:2602.21408.
+%   Algorithm 1 of Polson & Sokolov (2026) and the authors' reference
+%   implementation (gbc/iqn.py).
 %
 %   model = GBCTRAIN(X,Y,opts) uses the option struct from GBCOPTIONS.
 %
@@ -16,17 +17,18 @@ function model = gbcTrain(X, Y, opts)
 %             learned parameters, the standardisation constants and a
 %             training history.
 %
-%   Training draws a single tau ~ U[0,1] per example per mini-batch, so over
-%   many epochs the network sees the whole quantile curve without ever having
-%   to store it. Optimisation is Adam with a cosine-annealed learning rate.
+%   By default this reproduces the reference recipe: full-batch Adam with
+%   weight decay 1e-4, cosine annealing from 1e-3 down to 1e-5, and a single
+%   tau ~ U[0,1] drawn per gradient step and shared across the batch. Set
+%   opts.MiniBatchSize and opts.TauPerExample to depart from that.
 %
 %   Example
 %     X = rand(2000,10);
 %     Y = 10*sin(pi*X(:,1).*X(:,2)) + 20*(X(:,3)-0.5).^2 + 10*X(:,4) + ...
 %         5*X(:,5) + randn(2000,1);
-%     model = gbcTrain(X,Y,gbcOptions('MaxEpochs',1000));
+%     model = gbcTrain(X,Y,gbcOptions('MaxEpochs',3000));
 %
-%   See also GBCOPTIONS, GBCPREDICT, GBCSAMPLE, GBCMETRICS.
+%   See also GBCOPTIONS, GBCENSEMBLE, GBCPREDICT, GBCSAMPLE, GBCMETRICS.
 
 arguments
     X (:,:) double
@@ -48,10 +50,12 @@ nh = opts.NumCosine;
 
 % ---------------------------------------------------------------- scaling
 if opts.Standardize
+    % std normalised by N, not N-1: numpy's default, which is what the
+    % reference uses (X_np.std(0) + 1e-8).
     muX = mean(X,1);
-    sdX = std(X,0,1);  sdX(sdX < eps) = 1;
+    sdX = std(X,1,1) + 1e-8;
     muY = mean(Y);
-    sdY = std(Y);      if sdY < eps, sdY = 1; end
+    sdY = std(Y,1) + 1e-8;
 else
     muX = zeros(1,d); sdX = ones(1,d); muY = 0; sdY = 1;
 end
@@ -77,12 +81,14 @@ end
 avgG   = [];
 avgSqG = [];
 
-batch  = min(opts.MiniBatchSize, n);
-nBatch = max(1, ceil(n/batch));   % keep the partial last batch
+if isinf(opts.MiniBatchSize)
+    batch = n;                  % full batch, as in the reference
+else
+    batch = min(opts.MiniBatchSize, n);
+end
+nBatch    = max(1, ceil(n/batch));
 totalIter = opts.MaxEpochs * nBatch;
 
-history = struct('epoch',[],'loss',[],'anchor',[],'ordering',[], ...
-                 'pinball',[],'lr',[],'valCRPS',[]);
 lossLog = zeros(opts.MaxEpochs,4);
 lrLog   = zeros(opts.MaxEpochs,1);
 valLog  = nan(opts.MaxEpochs,1);
@@ -95,8 +101,11 @@ if hasVal
 end
 
 if opts.Verbose
-    fprintf('GBC-IQN: n=%d, d=%d, width=%d, epochs=%d, batch=%d, device=%s\n', ...
-        n, d, opts.HiddenSize, opts.MaxEpochs, batch, ternary(useGPU,'gpu','cpu'));
+    fprintf('GBC-IQN: n=%d d=%d width=%d bottleneck=%d steps=%d batch=%s tau=%s dev=%s\n', ...
+        n, d, opts.HiddenSize, opts.BottleneckSize, opts.MaxEpochs, ...
+        ternary(isinf(opts.MiniBatchSize),'full',num2str(batch)), ...
+        ternary(opts.TauPerExample,'per-example','per-step'), ...
+        ternary(useGPU,'gpu','cpu'));
     fprintf('%8s %12s %10s %10s %10s %10s\n', ...
         'epoch','loss','anchor','order','pinball','lr');
 end
@@ -105,7 +114,11 @@ iter = 0;
 t0 = tic;
 for epoch = 1:opts.MaxEpochs
 
-    idx = randperm(n);
+    if nBatch > 1
+        idx = randperm(n);
+    else
+        idx = 1:n;              % full batch: no shuffling needed
+    end
     epochParts = zeros(1,3);
     epochLoss  = 0;
 
@@ -113,16 +126,29 @@ for epoch = 1:opts.MaxEpochs
         iter = iter + 1;
 
         sel = idx((b-1)*batch + 1 : min(b*batch, n));
+        nb  = numel(sel);
         Xb  = dlarray(Xall(:,sel), 'CB');
         Yb  = Yall(:,sel);
 
-        % one tau draw per example (Algorithm 1, training phase)
-        tau = rand(1, numel(sel), 'single');
+        % Reference: one tau per gradient step, shared across the batch.
+        % Optional: an independent tau per example.
+        if opts.TauPerExample
+            tau = rand(1, nb, 'single');
+        else
+            tau = repmat(rand(1,1,'single'), 1, nb);
+        end
         if useGPU, tau = gpuArray(tau); end
         Phi = dlarray(quantileEmbedding(tau, nh), 'CB');
 
         [lossVal, grads, parts] = dlfeval(@gbcLoss, params, Xb, Phi, tau, ...
-                                          Yb, w, opts.L2Regularization);
+                                          Yb, w, 0);
+
+        % Adam weight decay exactly as torch.optim.Adam applies it: added to
+        % the gradient of every parameter, biases included. (This is the
+        % coupled L2 form, not AdamW's decoupled decay.)
+        if opts.WeightDecay > 0
+            grads = dlupdate(@(g,p) g + opts.WeightDecay*p, grads, params);
+        end
 
         lr = cosineAnneal(opts.InitialLR, opts.MinLR, iter, totalIter);
 
@@ -157,17 +183,17 @@ for epoch = 1:opts.MaxEpochs
     end
 end
 
-history.epoch    = (1:opts.MaxEpochs).';
-history.loss     = lossLog(:,1);
-history.anchor   = lossLog(:,2);
-history.ordering = lossLog(:,3);
-history.pinball  = lossLog(:,4);
-history.lr       = lrLog;
-history.valCRPS  = valLog;
+history.epoch     = (1:opts.MaxEpochs).';
+history.loss      = lossLog(:,1);
+history.anchor    = lossLog(:,2);
+history.ordering  = lossLog(:,3);
+history.pinball   = lossLog(:,4);
+history.lr        = lrLog;
+history.valCRPS   = valLog;
 history.trainTime = toc(t0);
 
 model = packModel(params, opts, muX, sdX, muY, sdY, d);
-model.history = history;
+model.history  = history;
 model.numTrain = n;
 
 if opts.Verbose
@@ -182,7 +208,8 @@ model = struct('params',params,'opts',opts,'muX',muX,'sdX',sdX, ...
 end
 
 function lr = cosineAnneal(lrMax, lrMin, iter, total)
-%COSINEANNEAL Loshchilov & Hutter (2017) single-cycle cosine schedule.
+%COSINEANNEAL Loshchilov & Hutter (2017) single-cycle cosine schedule, in the
+%   form torch.optim.lr_scheduler.CosineAnnealingLR uses.
 lr = lrMin + 0.5*(lrMax - lrMin)*(1 + cos(pi * (iter-1) / max(1,total-1)));
 end
 

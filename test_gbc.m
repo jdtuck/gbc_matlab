@@ -28,6 +28,10 @@ state = check(state, 'ordering surrogate: correct sign per tau',  @t_ordering);
 state = check(state, 'loss weights: components isolate cleanly',  @t_weights);
 state = check(state, 'gradients: dlgradient vs finite differences',@t_gradcheck);
 state = check(state, 'forward pass: shapes and tau-dependence',   @t_forward);
+state = check(state, 'architecture: tanh bottleneck present',     @t_bottleneck);
+state = check(state, 'CRPS: permuted estimator tracks exact',     @t_crps_methods);
+state = check(state, 'metrics: quantiles match numpy linear rule',@t_rowquantile);
+state = check(state, 'ensemble: pooled shape and ordering',       @t_ensemble);
 state = check(state, 'predict: column order preserved',           @t_colorder);
 state = check(state, 'train: reproducible under a fixed seed',    @t_seed);
 
@@ -271,7 +275,7 @@ function msg = t_gradcheck()
 % far away compared with the step size h.
 
 d = 3; nh = 5; hid = 6;
-opts = gbcOptions('HiddenSize',hid,'NumCosine',nh);
+opts = gbcOptions('HiddenSize',hid,'NumCosine',nh,'BottleneckSize',4);
 
 h      = 1e-5;
 margin = 1e-3;              % require every kink to be >> h away
@@ -284,6 +288,9 @@ for attempt = 1:50
     p.bx = dlarray(0.3*randn(hid,1));
     p.bt = dlarray(0.3*randn(hid,1));
     p.b1 = dlarray(0.3*randn(hid,1));
+    if isfield(p,'W2')
+        p.b2 = dlarray(0.3*randn(size(p.b2)));
+    end
     p.bo = dlarray(0.3*randn(2,1));
 
     Xc   = dlarray(randn(d,20),'CB');
@@ -378,6 +385,102 @@ msg = sprintf('tau sensitivity %.2f', dq);
 end
 
 % -------------------------------------------------------------------------
+function msg = t_bottleneck()
+% The reference net has Linear(hdim,64)+Tanh before the output head; the
+% paper's architecture equation omits it. It must be present by default and
+% removable via BottleneckSize = 0.
+pWith = gbcInit(3, gbcOptions('HiddenSize',8,'NumCosine',4));
+assertTrue(isfield(pWith,'W2'), 'default init has no bottleneck layer');
+assertTrue(isequal(size(pWith.W2),[64 8]), ...
+    'bottleneck is %s, expected 64-by-8', mat2str(size(pWith.W2)));
+assertTrue(isequal(size(pWith.Wo),[2 64]), ...
+    'output head is %s, expected 2-by-64 (it should read the bottleneck)', ...
+    mat2str(size(pWith.Wo)));
+
+pNone = gbcInit(3, gbcOptions('HiddenSize',8,'NumCosine',4,'BottleneckSize',0));
+assertTrue(~isfield(pNone,'W2'), 'BottleneckSize=0 still created a bottleneck');
+assertTrue(isequal(size(pNone.Wo),[2 8]), ...
+    'without a bottleneck the head should read the 8-wide trunk');
+
+% Both must run, and the tanh must actually bound its layer's output.
+X   = dlarray(single(randn(3,9)),'CB');
+Phi = dlarray(quantileEmbedding(single(rand(1,9)),4),'CB');
+[~, q1] = gbcForward(pWith, X, Phi);
+[~, q2] = gbcForward(pNone, X, Phi);
+assertTrue(all(isfinite(extractdata(q1))) && all(isfinite(extractdata(q2))), ...
+    'forward pass produced non-finite output');
+
+msg = 'present by default, removable, both paths run';
+end
+
+% -------------------------------------------------------------------------
+function msg = t_crps_methods()
+% The reference's single-permutation estimator and the exact pairwise one
+% target the same quantity. On a large sample they should agree closely.
+rng(11);
+n = 60; M = 4000;
+Q = randn(n,1) + randn(n,M);
+y = randn(n,1);
+
+a = gbcCRPS(Q, y, "exact");
+b = gbcCRPS(Q, y, "permuted");
+rel = abs(a-b)/abs(a);
+assertTrue(rel < 0.03, ...
+    'permuted CRPS %.5f differs from exact %.5f by %.1f%%', b, a, 100*rel);
+
+% The permuted one is stochastic; the exact one must not be.
+assertTrue(gbcCRPS(Q,y,"exact") == a, 'exact CRPS is not deterministic');
+
+msg = sprintf('exact %.4f vs permuted %.4f (%.2f%%)', a, b, 100*rel);
+end
+
+% -------------------------------------------------------------------------
+function msg = t_rowquantile()
+% gbcMetricsFromSamples must use numpy's default 'linear' quantile rule, so
+% that interval endpoints match the reference. With a row of 0:100, the 5%
+% and 95% quantiles land exactly on 5 and 95.
+S = repmat(0:100, 4, 1);
+y = [50; 50; 50; 50];
+m = gbcMetricsFromSamples(S, y, 0.90);
+
+assertTrue(abs(m.Width - 90) < 1e-9, ...
+    '90%% width is %.6f, expected exactly 90', m.Width);
+assertTrue(abs(m.RMSE) < 1e-9, ...
+    'median should be exactly 50, giving zero RMSE; got %.6g', m.RMSE);
+assertTrue(m.Coverage == 1, 'y = 50 must fall inside [5,95]');
+
+msg = 'width 90, median 50, matches the linear rule';
+end
+
+% -------------------------------------------------------------------------
+function msg = t_ensemble()
+% A cell array of models must pool into one sorted sample matrix.
+X = rand(40,2); Y = X*[1;-1] + 0.2*randn(40,1);
+o = gbcOptions('MaxEpochs',5,'HiddenSize',16,'BottleneckSize',8, ...
+               'Verbose',false);
+models = gbcEnsemble(X, Y, 3, o, [1 2 3]);
+
+assertTrue(iscell(models) && numel(models)==3, 'ensemble is not a 1-by-3 cell');
+
+tauGrid = linspace(0.005,0.995,20);
+S = gbcPredict(models, X(1:7,:), tauGrid);
+assertTrue(isequal(size(S),[7 60]), ...
+    'pooled sample is %s, expected 7-by-60', mat2str(size(S)));
+assertTrue(all(all(diff(S,1,2) >= -1e-12)), 'pooled rows are not sorted');
+
+% Members must genuinely differ - otherwise the ensemble buys nothing.
+S1 = gbcPredict(models{1}, X(1:7,:), tauGrid);
+S2 = gbcPredict(models{2}, X(1:7,:), tauGrid);
+assertTrue(max(abs(S1(:)-S2(:))) > 1e-8, ...
+    'ensemble members are identical despite different seeds');
+
+m = gbcMetricsFromSamples(S, Y(1:7), 0.90);
+assertTrue(isfinite(m.CRPS) && isfinite(m.RMSE), 'ensemble metrics not finite');
+
+msg = 'pooled 3x20 -> 60 columns, sorted, members distinct';
+end
+
+% -------------------------------------------------------------------------
 function msg = t_colorder()
 % gbcPredict must return columns in the caller's tau order, not sorted order.
 X = rand(30,2); Y = X*[1;2] + 0.1*randn(30,1);
@@ -422,8 +525,7 @@ mu = @(x) sin(2*pi*x);
 sd = @(x) 0.1 + 0.4*x;
 y = mu(x) + sd(x).*randn(n,1);
 
-model = gbcTrain(x, y, gbcOptions('MaxEpochs',1200,'MiniBatchSize',256, ...
-    'Verbose',false,'Seed',5));
+model = gbcTrain(x, y, gbcOptions('MaxEpochs',4000,'Verbose',false,'Seed',5));
 
 xs   = (0.05:0.05:0.95).';
 taus = [0.1 0.25 0.5 0.75 0.9];
@@ -485,7 +587,14 @@ zx = fullyconnect(X,   params.Wx, params.bx);
 zt = fullyconnect(Phi, params.Wt, params.bt);
 hm = relu(zx) .* relu(zt);
 z1 = fullyconnect(hm,  params.W1, params.b1);
-out = fullyconnect(relu(z1), params.Wo, params.bo);
+
+h = relu(z1);
+if isfield(params,'W2')
+    % The bottleneck uses tanh, which is smooth, so it adds no kink of its
+    % own - but it does sit between z1 and the output.
+    h = tanh(fullyconnect(h, params.W2, params.b2));
+end
+out = fullyconnect(h, params.Wo, params.bo);
 
 resid  = Y - out(2,:);          % pinball and ordering kinks
 anchor = Y - out(1,:);          % L1 anchor kink

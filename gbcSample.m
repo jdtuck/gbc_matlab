@@ -23,10 +23,22 @@ function S = gbcSample(model, Xnew, B)
 %
 %   See also GBCPREDICT, GBCTRAIN.
 
+%   ENSEMBLES. If model is a cell array (see GBCENSEMBLE), each of the K
+%   members draws B samples and the results are pooled, giving n-by-(K*B).
+
 arguments
-    model struct
+    model {mustBeA(model,["struct","cell"])}
     Xnew  (:,:) double
     B     (1,1) double {mustBePositive, mustBeInteger} = 200
+end
+
+if iscell(model)
+    parts = cell(1,numel(model));
+    for k = 1:numel(model)
+        parts{k} = gbcSample(model{k}, Xnew, B);
+    end
+    S = [parts{:}];
+    return
 end
 
 if size(Xnew,2) ~= model.dIn

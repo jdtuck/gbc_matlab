@@ -4,48 +4,76 @@ function opts = gbcOptions(varargin)
 %   opts = GBCOPTIONS() returns the default option struct.
 %   opts = GBCOPTIONS('Name',Value,...) overrides individual fields.
 %
-%   Defaults follow Polson & Sokolov (2026), "Generative Bayesian Computation
-%   as a Scalable Alternative to Gaussian Process Surrogates", arXiv:2602.21408.
+%   Defaults follow the authors' reference implementation
+%   (github.com/VadimSokolov/gbc-surrogate, gbc/iqn.py), which is the
+%   authority wherever it and the paper's text differ. See README.md,
+%   "Reconciling the paper with the reference code".
 %
-%   Fields
-%   ------
-%   HiddenSize     Width of f_x, f_tau and f_1 (paper: 256).
-%   NumCosine      n_h, size of the cosine quantile embedding (paper: 32).
-%   LossWeights    [w1 w2 w3] in Eq. (1). Paper defaults:
-%                    [0.3 0.3 0.4] smooth / heteroskedastic responses
-%                    [0.1 0.2 0.7] "quantile-dominant", for jump processes
-%   MaxEpochs      Paper uses 3,000-8,000 depending on dataset size.
-%   MiniBatchSize  Not stated in the paper; 256 is a reasonable default.
-%   InitialLR      Adam learning rate (paper: 1e-3).
-%   MinLR          Floor of the cosine-annealing schedule.
-%   GradientDecay  Adam beta1.
-%   SqGradDecay    Adam beta2.
-%   L2Regularization  Weight decay applied to weight matrices (0 = off).
-%   Standardize    Z-score inputs and response (implementation choice; the
-%                  paper does not specify a normalisation protocol).
+%   Architecture
+%   ------------
+%   HiddenSize      Width of f_x, f_tau and f_1 (reference: 256).
+%   BottleneckSize  Width of the Tanh layer before the output (reference: 64).
+%                   Set 0 to go straight from f_1 to the output head, which is
+%                   the architecture Eq. (2) of the paper literally describes.
+%   NumCosine       n_h, size of the cosine quantile embedding (reference: 32).
+%
+%   Loss
+%   ----
+%   LossWeights     [w1 w2 w3] in Eq. (1). Reference defaults:
+%                     [0.3 0.3 0.4] smooth / heteroskedastic responses
+%                     [0.1 0.2 0.7] "quantile-dominant", for jump processes
+%
+%   Optimisation
+%   ------------
+%   MaxEpochs       Gradient steps when full batch (reference default: 3000;
+%                   the motorcycle table uses 5000).
+%   MiniBatchSize   Inf for full-batch training, which is what the reference
+%                   does. A finite value switches to shuffled mini-batches.
+%   TauPerExample   false (reference): ONE tau ~ U[0,1] per gradient step,
+%                   shared by every example in the batch.
+%                   true: an independent tau per example, which covers the
+%                   quantile curve faster per step but is not what the
+%                   reference does.
+%   InitialLR       Adam learning rate (reference: 1e-3).
+%   MinLR           Cosine-annealing floor. [] means 0.01*InitialLR, matching
+%                   the reference's eta_min.
+%   WeightDecay     Adam weight decay, applied exactly as torch.optim.Adam
+%                   does it: wd*theta added to the gradient of every
+%                   parameter, biases included (reference: 1e-4).
+%   GradientDecay   Adam beta1.
+%   SqGradDecay     Adam beta2.
+%
+%   Data handling
+%   -------------
+%   Standardize     Z-score inputs and response (the reference does this).
+%
+%   Run control
+%   -----------
 %   ExecutionEnvironment  'auto' | 'cpu' | 'gpu'.
-%   Verbose        Print progress.
-%   VerboseFreq    Print every N epochs.
-%   ValidationData {Xval,Yval} cell array, or [] for none.
-%   Seed           RNG seed, or [] to leave the global stream alone.
+%   Verbose         Print progress.
+%   VerboseFreq     Print every N epochs.
+%   ValidationData  {Xval,Yval} cell array, or [] for none.
+%   Seed            RNG seed, or [] to leave the global stream alone.
 %
-%   See also GBCTRAIN, GBCPREDICT, GBCMETRICS.
+%   See also GBCTRAIN, GBCENSEMBLE, GBCPREDICT, GBCMETRICS.
 
 opts = struct( ...
     'HiddenSize',           256, ...
+    'BottleneckSize',       64, ...
     'NumCosine',            32, ...
     'LossWeights',          [0.3 0.3 0.4], ...
     'MaxEpochs',            3000, ...
-    'MiniBatchSize',        256, ...
+    'MiniBatchSize',        Inf, ...
+    'TauPerExample',        false, ...
     'InitialLR',            1e-3, ...
-    'MinLR',                0, ...
+    'MinLR',                [], ...
+    'WeightDecay',          1e-4, ...
     'GradientDecay',        0.9, ...
     'SqGradDecay',          0.999, ...
-    'L2Regularization',     0, ...
     'Standardize',          true, ...
     'ExecutionEnvironment', 'auto', ...
     'Verbose',              true, ...
-    'VerboseFreq',          100, ...
+    'VerboseFreq',          250, ...
     'ValidationData',       [], ...
     'Seed',                 []);
 
@@ -63,4 +91,10 @@ end
 validateattributes(opts.LossWeights,{'numeric'},{'vector','numel',3,'nonnegative'});
 validateattributes(opts.HiddenSize,{'numeric'},{'scalar','positive','integer'});
 validateattributes(opts.NumCosine,{'numeric'},{'scalar','positive','integer'});
+validateattributes(opts.BottleneckSize,{'numeric'},{'scalar','nonnegative','integer'});
+validateattributes(opts.WeightDecay,{'numeric'},{'scalar','nonnegative'});
+
+if isempty(opts.MinLR)
+    opts.MinLR = 0.01 * opts.InitialLR;    % torch CosineAnnealingLR eta_min
+end
 end

@@ -3,7 +3,13 @@
 A MATLAB implementation of the Implicit Quantile Network surrogate from
 
 > N. Polson and V. Sokolov (2026). *Generative Bayesian Computation as a
-> Scalable Alternative to Gaussian Process Surrogates.* arXiv:2602.21408.
+> Scalable Alternative to Gaussian Process Surrogates.* arXiv:2602.21408
+> (Technometrics).
+
+Cross-checked against the authors' reproducibility package at
+[github.com/VadimSokolov/gbc-surrogate](https://github.com/VadimSokolov/gbc-surrogate).
+**Where the paper's text and the reference code disagree, this implementation
+follows the code**, and every such case is listed below.
 
 The idea in one paragraph: instead of fitting a Gaussian process to an
 expensive simulator and paying O(n³) for the Cholesky factorisation while
@@ -13,36 +19,36 @@ level τ as an input. Sampling the posterior predictive at a new x* is then a
 single forward pass per draw — the noise-outsourcing representation says that
 pushing U ~ Uniform[0,1] through the learned quantile function reproduces the
 conditional law exactly. Cost is linear in n, nothing is assumed stationary,
-and discontinuous or multimodal responses need no custom kernel.
+and discontinuous, multimodal or heteroskedastic responses need no custom
+kernel and no separate variance model.
 
 ## Requirements
 
-MATLAB R2020b or later with **Deep Learning Toolbox** (for `dlarray`,
+MATLAB R2020b or later with **Deep Learning Toolbox** (`dlarray`,
 `dlgradient`, `fullyconnect`, `adamupdate`). No Statistics Toolbox is needed —
-the Gaussian CDF/quantile calls are written in terms of `erf`/`erfinv`.
-Parallel Computing Toolbox is used automatically if a GPU is present, and
-ignored otherwise.
+Gaussian CDF/quantile calls are written with `erf`/`erfinv`, and the empirical
+quantile rule is implemented directly. Parallel Computing Toolbox is used
+automatically if a GPU is present, and ignored otherwise.
 
 ## Quick start
 
 ```matlab
 addpath(genpath('gbc-matlab'));
 
-% Any (X, y) pairs from an expensive forward model.
-X = rand(2000,10);
-Y = 10*sin(pi*X(:,1).*X(:,2)) + 20*(X(:,3)-0.5).^2 + 10*X(:,4) + 5*X(:,5) ...
-    + randn(2000,1);
+model = gbcTrain(X, Y);                          % (n-by-d, n-by-1)
+Q = gbcPredict(model, Xnew, [0.05 0.5 0.95]);    % quantiles
+S = gbcSample(model, Xnew, 500);                 % predictive draws
+m = gbcMetrics(model, Xtest, Ytest);             % RMSE / CRPS / coverage
 
-model = gbcTrain(X, Y, gbcOptions('MaxEpochs',1500));
-
-Q = gbcPredict(model, Xnew, [0.05 0.5 0.95]);   % quantiles
-S = gbcSample(model, Xnew, 500);                % predictive draws
-m = gbcMetrics(model, Xtest, Ytest);            % RMSE / CRPS / coverage
+models = gbcEnsemble(X, Y, 5);                   % K = 5, as the paper uses
+S = gbcPredict(models, Xnew, linspace(0.005,0.995,100));   % pooled samples
+m = gbcMetricsFromSamples(S, Ytest);
 ```
 
-Then run the demos and the test suite:
+Demos and tests:
 
 ```matlab
+demo_motorcycle     % MASS::mcycle, the paper's Table 1 protocol
 demo_friedman10     % 10-D Friedman, smooth-response weights
 demo_jump2d         % 2-D bi-mixture GP with a jump, quantile-dominant weights
 test_gbc            % fast verification checks
@@ -53,130 +59,128 @@ test_gbc(true)      % plus the end-to-end calibration test
 
 | File | Role |
 |---|---|
-| `gbcOptions.m` | Hyper-parameters, with the paper's defaults |
-| `gbcInit.m` | Glorot initialisation of the learnable parameters |
+| `gbcOptions.m` | Hyper-parameters, with the reference's defaults |
+| `gbcInit.m` | Xavier initialisation of the learnable parameters |
 | `quantileEmbedding.m` | φ(τ) = [cos(jπτ)]ⱼ₌₀^{n_h−1}, n_h = 32 |
-| `gbcForward.m` | G_φ(τ,x) = f_out( f₁( f_x(x) ⊙ f_τ(φ(τ)) ) ) |
+| `gbcForward.m` | The IQN forward pass |
 | `gbcLoss.m` | The three-term composite loss, Eq. (1) |
 | `gbcTrain.m` | Algorithm 1, training phase: Adam + cosine annealing |
-| `gbcPredict.m` | Conditional quantiles on a τ grid |
+| `gbcEnsemble.m` | K independent fits whose quantiles pool at test time |
+| `gbcPredict.m` | Conditional quantiles; accepts a single model or an ensemble |
 | `gbcSample.m` | Algorithm 1, test phase: τ ~ U[0,1] → predictive draws |
-| `gbcCRPS.m` | The paper's CRPS estimator, in O(M log M) |
-| `gbcMetrics.m` | RMSE, CRPS, interval coverage and width, PIT values |
+| `gbcCRPS.m` | CRPS, exact pairwise or the reference's permuted estimator |
+| `gbcMetricsFromSamples.m` | RMSE / CRPS / coverage / width / PIT from samples |
+| `gbcMetrics.m` | Convenience wrapper: predict, then score |
+| `mcycleData.m` | MASS::mcycle, n = 133, verified against two sources |
+| `demos/demo_motorcycle.m` | Table 1: heteroskedastic benchmark |
 | `demos/demo_friedman10.m` | Friedman 10-D benchmark |
 | `demos/demo_jump2d.m` | Bi-mixture GP jump benchmark (BGP, d = 2) |
 | `tests/test_gbc.m` | Verification suite |
 
-## What maps to what
-
-**Architecture (Sec. 3).** The quantile level is embedded in a cosine basis,
-φ(τ) = [cos(jπτ)] for j = 0…31, and passed through its own fully-connected
-ReLU layer. The predictor x goes through a parallel layer. The two are merged
-by an **elementwise product**, not a concatenation — this is what makes a
-single set of weights represent the entire quantile curve rather than a
-τ-indexed family of separate fits. A shared ReLU layer follows, then a linear
-output with two heads: μ̂ (an L1 anchor used only during training) and q̂_τ
-(the prediction). All three hidden layers are 256 wide.
-
-**Loss (Eq. 1).**
+## Architecture and loss
 
 ```
-ℓ(τ) = w₁·E|y − μ̂|                       location anchor, suppresses mode collapse
-     + w₂·E[|τ − 0.5|·m_τ]                ordering surrogate, penalises crossings
-     + w₃·E[max(τe, (τ−1)e)]              pinball loss, e = y − q̂_τ
+h   = f_1( f_x(x) ⊙ f_τ(φ(τ)) )        three FC+ReLU layers, width 256
+out = f_out( tanh( f_2(h) ) )          f_2 is width 64
+```
+
+`f_out` has two heads: μ̂ (an L1 anchor used only in training) and q̂_τ (the
+prediction). The merge is an **elementwise product**, not a concatenation —
+that is what lets one set of weights represent the entire quantile curve
+rather than a τ-indexed family of separate fits.
+
+```
+ℓ(τ) = w₁·E|y − μ̂|                    location anchor, suppresses mode collapse
+     + w₂·E[|τ − 0.5|·m_τ]             ordering surrogate, penalises crossings
+     + w₃·E[max(τe, (τ−1)e)]           pinball loss, e = y − q̂_τ
 
 m_τ = max(0, q̂_τ − y)  if τ < 0.5
       max(0, y − q̂_τ)  if τ ≥ 0.5
 ```
 
-Weights default to (0.3, 0.3, 0.4) for smooth or heteroskedastic responses.
-For jump processes the paper's **quantile-dominant** setting (0.1, 0.2, 0.7) is
-reported to improve CRPS by roughly 28%; `demo_jump2d.m` uses it and has a
-one-line switch so you can see the difference on your own data.
+Weights default to (0.3, 0.3, 0.4). For jump processes use the
+**quantile-dominant** setting (0.1, 0.2, 0.7), which the paper reports
+improves CRPS by ~28% there.
 
-**Training (Algorithm 1).** One τ ~ Uniform[0,1] is drawn per training example
-per mini-batch, so the network sees the whole quantile curve over the course of
-training without ever materialising it. Adam at lr = 10⁻³ with single-cycle
-cosine annealing. The paper uses 3,000–8,000 epochs; the demos use fewer to
-keep runtimes reasonable and still converge on these problems.
+## Reconciling the paper with the reference code
 
-**Prediction (Algorithm 1, test phase).** `gbcSample` draws τ^(b) ~ U[0,1] and
-returns q̂_{τ^(b)}(x*) — one forward pass per draw, no linear algebra, which is
-the O(n) test-time behaviour that motivates the method.
+These are the places where the published description and
+`gbc/iqn.py` disagree. In each case the code wins, since the code is what
+produced the tables.
 
-**CRPS.** The estimator in the paper,
+| # | Paper says (or omits) | Reference code does | Here |
+|---|---|---|---|
+| 1 | `G(τ,x) = f_out(f₁(f_x ⊙ f_τ))` — three layers | An extra `Linear(256→64) + Tanh` before the head | Included; `BottleneckSize = 0` restores the paper's literal form |
+| 2 | "a single draw τ ~ U[0,1] per training example" | **One scalar τ per gradient step**, shared across the whole batch | Default matches the code; `TauPerExample = true` for per-example |
+| 3 | Mini-batching implied, size unstated | **Full batch**, one gradient step per "epoch" | `MiniBatchSize = Inf` by default |
+| 4 | No weight decay mentioned | Adam `weight_decay = 1e-4` | `WeightDecay = 1e-4`, applied as torch does (coupled, all params incl. biases) |
+| 5 | Cosine annealing, floor unstated | `eta_min = 0.01 × lr` | `MinLR = 0.01 × InitialLR` |
+| 6 | Test phase: "draw τ ~ U[0,1]" | Deterministic grid `linspace(0.005, 0.995, 500)` | `gbcSample` draws; `gbcPredict` takes any grid — pass that one to match |
+| 7 | CRPS = full double sum `(1/2M²)ΣΣ` | **Single random permutation**: `0.5·mean|q − q[perm]|` | Exact pairwise by default; `gbcCRPS(...,"permuted")` for the reference |
+| 8 | Single model | Table 1 uses a **K = 5 ensemble**, 100 quantiles each | `gbcEnsemble` |
+| 9 | Standardisation unspecified | z-score X and y, `std` normalised by N (numpy default) | Matches, including the N vs N−1 detail |
 
-```
-CRPS(F,y) = (1/M)Σ|q_m − y| − (1/2M²)ΣΣ|q_m − q_m'|
-```
+Item 1 is the one that changes results materially — a missing layer is a
+different model. Items 2 and 3 together mean the reference does far fewer
+gradient steps than "3000 epochs" suggests: 3000 steps total, each seeing one
+τ. Item 7 is worth knowing if you compare numbers: the permuted estimator is
+stochastic, so the paper's CRPS values carry a little noise that the exact
+estimator here does not.
 
-is implemented via the exact identity, for q sorted ascending,
-ΣΣ|q_i − q_j| = 2·Σ_i (2i − M − 1)·q_(i), so the double sum costs a sort rather
-than M² operations. This is algebra, not an approximation, and it is checked
-against brute force in the test suite.
+## Choices that are mine, not the paper's or the code's
 
-## Choices I made where the paper is silent
-
-These are documented so you can change them, not smuggled in:
-
-- **Standardisation.** Inputs and response are z-scored during training and
-  de-standardised on prediction (`Standardize`, default `true`). The paper does
-  not specify a normalisation protocol beyond noting one benchmark was scaled
-  to [0,1]. This matters more than it sounds: the cosine embedding has unit
-  scale, so an unscaled y with a large range makes the multiplicative merge
-  badly conditioned.
-- **Mini-batch size** of 256, not stated in the paper.
 - **Quantile rearrangement.** `gbcPredict` sorts each row's quantiles by
-  default. The ordering surrogate discourages crossings but does not forbid
-  them. Sorting is the Chernozhukov–Fernández-Galichon rearrangement, which
-  weakly reduces the aggregate check-loss risk (verified numerically in the
-  test suite) and leaves the CRPS estimator unchanged, since that estimator is
-  permutation invariant. Pass `false` as the fourth argument to see the raw
-  network output and inspect the crossing rate.
-- **Glorot-uniform initialisation**, zero biases.
+  default. Neither the paper nor the reference does this; both rely on the
+  ordering surrogate, which discourages crossings without forbidding them.
+  Sorting is the Chernozhukov–Fernández-Galichon rearrangement, which weakly
+  reduces the aggregate check-loss risk (verified in the test suite) and
+  leaves the CRPS estimator unchanged, since that estimator is permutation
+  invariant. Pass `false` as the fourth argument to inspect raw output and
+  measure the crossing rate.
+- **Mini-batching** is available but off; the reference is full-batch only.
 
 ## What is not implemented
 
-- **GBC-Aug**, the boundary-augmented variant (an MLP regime classifier whose
-  output is appended as an extra input feature). Straightforward to add on top
-  of this code: train a classifier on a regime label, then call `gbcTrain` on
-  `[X, chat(X)]`.
-- **GP baselines and the active-learning loops** (LGBB rocket, GRACE
-  satellite). Nothing here compares GBC against a GP; the demos report GBC's
-  own numbers, and `demo_friedman10.m` additionally prints the oracle CRPS —
-  the closed-form score of the true N(f(x), σ²) predictive law — so you can see
-  how much of the achievable gap is closed rather than relying on a
-  reimplemented baseline.
-- **Eleven of the fourteen benchmarks**, most of which need external datasets
-  (the semiconductor fab AMHV data, the LGBB aerodynamic runs, GRACE drag
-  coefficients).
+- **GBC-Aug**, the boundary-augmented variant. Per the reference README, it is
+  a preprocessing step: EM-cluster y into two components, train an MLP
+  classifier x → P(regime | x), append that probability as an extra input
+  feature, then train a standard IQN. Buildable on top of this code without
+  touching it — `gbcTrain([X, phat], Y)`.
+- **GP baselines** (hetGP, MJGP, deepgp) and the active-learning loops. The
+  paper's comparisons run those in R. Nothing here reimplements them, so the
+  demos report GBC's own numbers only; `demo_friedman10.m` prints the oracle
+  CRPS of the true N(f(x), σ²) law as a reference floor instead of a
+  reimplemented competitor.
+- **Ten of the fourteen benchmarks**, which need external data (the fab AMHV
+  runs, LGBB aerodynamics, GRACE drag, and the Flowers et al. jumpgp CSVs).
 
 ## Verification
 
-`test_gbc` checks the implementation against things outside it rather than
-against itself:
+`test_gbc` checks the implementation against things outside it: the cosine
+embedding against its definition computed by an explicit loop; the CRPS
+pairwise identity against brute-force double summation; the CRPS estimator
+against the **closed-form Gaussian CRPS**; permutation invariance; the
+rearrangement inequality; the pinball minimiser against the empirical
+quantile by grid search; the ordering surrogate's sign convention against
+hand-computed values; **every gradient against central finite differences** in
+double precision; the presence and removability of the bottleneck layer; the
+permuted CRPS estimator against the exact one; the empirical-quantile rule
+against numpy's linear interpolation; ensemble pooling shape and member
+distinctness; column-order preservation; bit-reproducibility under a fixed
+seed; and (slow test) end-to-end recovery of the **analytically known**
+conditional quantiles of a heteroskedastic Gaussian problem.
 
-- the cosine embedding against its definition, computed by an explicit loop;
-- the CRPS pairwise-sum identity against brute-force double summation;
-- the CRPS estimator against the **closed-form Gaussian CRPS**, and its error
-  shrinking as the quantile grid refines;
-- permutation invariance of the CRPS estimator;
-- that rearranging a crossing quantile curve never raises its check-loss risk;
-- that the pinball-loss minimiser is the empirical quantile, by grid search;
-- the sign convention of the ordering surrogate, by forcing q̂ to a known
-  constant and comparing against hand-computed values;
-- **every gradient against central finite differences** in double precision;
-- shape and τ-sensitivity of the forward pass;
-- column-order preservation and monotonicity in `gbcPredict`;
-- bit-reproducibility under a fixed seed;
-- (slow test) end-to-end recovery of the **analytically known** conditional
-  quantiles of a heteroskedastic Gaussian problem, plus 90% interval coverage
-  landing inside [0.85, 0.95].
+The gradient check deserves a note, because it bit twice during development.
+The loss is piecewise linear, so central differences are exact away from a
+kink and meaningless on one. `gbcInit` sets biases to zero, and the
+multiplicative merge means any example whose first-layer pre-activations are
+all negative produces an exactly-zero hidden vector and so an exactly-zero
+pre-activation downstream — sitting precisely on a ReLU kink. The check
+therefore draws its probe point with nonzero biases and refuses to run until
+every kink is at least 100× the step size away.
 
-I could not run MATLAB in the environment where this was written, so the tests
-have not been executed — run `test_gbc` first and tell me about any failure.
-The mathematical identities the tests assert (the pairwise-sum identity, the
-Gaussian CRPS convergence, the pinball minimiser, the rearrangement
-inequality) were each verified numerically before being written into the
-assertions, so a failure there points at the MATLAB code rather than at a bad
-expectation.
+I could not run MATLAB in the environment where this was written, so the code
+is unexecuted. Every mathematical identity the tests assert was verified
+numerically outside MATLAB first, and the mcycle data was verified
+element-by-element against two independent sources, so a test failure points
+at the MATLAB rather than at a bad expectation.
