@@ -227,6 +227,7 @@ model = gbcModel(params, opts, muX, sdX, muY, sdY, d, history, n);
 if opts.Verbose
     fprintf('Done in %.1f s.\n', history.trainTime);
 end
+
 end
 
 % =========================================================================

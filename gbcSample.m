@@ -19,7 +19,7 @@ function S = gbcSample(model, Xnew, B)
 %
 %   Because a single forward pass yields a draw, generating a full predictive
 %   distribution costs B network evaluations and no linear algebra - this is
-%   the O(n) test-time behaviour that motivates GBC over a GP surrogate.
+%   the O(n) test-time behavior that motivates GBC over a GP surrogate.
 %
 %   See also GBCPREDICT, GBCTRAIN.
 
