@@ -42,7 +42,7 @@
 clear; close all;
 addpath(fileparts(fileparts(mfilename('fullpath'))));
 
-PRESET = "fast";       % "fast" | "paper"
+PRESET = "paper";       % "fast" | "paper"
 
 switch PRESET
     case "fast"

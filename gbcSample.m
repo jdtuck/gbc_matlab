@@ -49,7 +49,7 @@ end
 nh    = model.opts.NumCosine;
 n     = size(Xnew,1);
 onGPU = false;
-try, onGPU = isgpuarray(extractdata(model.params.Wx)); catch, end
+try onGPU = isgpuarray(extractdata(model.params.Wx)); catch, end
 
 Xs = (Xnew - model.muX) ./ model.sdX;
 X0 = single(Xs.');                        % d-by-n
