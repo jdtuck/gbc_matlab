@@ -124,6 +124,22 @@ if fullBatch
     YbFixed = Yall;
 end
 
+% Profiling shows a FIXED ~5-8 ms of tracing overhead per dlfeval call that
+% does not shrink with n and is the same on CPU and GPU - on GPU it IS the
+% whole step time out to n = 20000. dlaccelerate caches the traced graph and
+% reuses it, which is the direct fix. Safe here only because the loss is now
+% branch-free in tau (see gbcLoss) and tau is passed as a traced dlarray, so
+% no tau-dependent comparison can be frozen into the cache.
+lossFcn = @gbcLoss;
+if opts.Accelerate
+    if isempty(which('dlaccelerate'))
+        warning('gbcTrain:NoAccelerate', ...
+            'dlaccelerate is unavailable on this release; training unaccelerated.');
+    else
+        lossFcn = dlaccelerate(@gbcLoss);
+    end
+end
+
 iter = 0;
 nLogged = 0;
 t0 = tic;
@@ -155,23 +171,32 @@ for epoch = 1:opts.MaxEpochs
         % Reference: one tau per gradient step, shared across the batch.
         % Optional: an independent tau per example.
         if opts.TauPerExample
-            tau = rand(1, nb, 'single');
+            tauRaw = rand(1, nb, 'single');
         else
-            tau = repmat(rand(1,1,'single'), 1, nb);
+            tauRaw = repmat(rand(1,1,'single'), 1, nb);
         end
-        if useGPU, tau = gpuArray(tau); end
-        Phi = dlarray(quantileEmbedding(tau, nh), 'CB');
+        if useGPU, tauRaw = gpuArray(tauRaw); end
+        Phi = dlarray(quantileEmbedding(tauRaw, nh), 'CB');
+
+        % tau goes in as a traced dlarray, not a plain array. A cached trace
+        % keys on dlarray size rather than value, so a traced tau keeps the
+        % trace valid across steps; a plain one would either be baked in or
+        % force a cache miss every step.
+        tau = dlarray(tauRaw, 'CB');
 
         % Only ask for the loss value and its breakdown on epochs we actually
         % record. Each extractdata forces a copy (and a device sync on GPU),
         % and at one gradient step per epoch that cost lands on every step.
         if atCheckpoint
+            % Deliberately the UNaccelerated handle: the three-term breakdown
+            % calls extractdata, which cannot live inside a cached trace.
+            % This runs a handful of times per fit, so it costs nothing.
             [lossVal, grads, parts] = dlfeval(@gbcLoss, params, Xb, Phi, ...
                                               tau, Yb, w, 0);
             epochLoss  = epochLoss  + gather(double(extractdata(lossVal)));
             epochParts = epochParts + parts;
         else
-            [~, grads] = dlfeval(@gbcLoss, params, Xb, Phi, tau, Yb, w, 0);
+            [~, grads] = dlfeval(lossFcn, params, Xb, Phi, tau, Yb, w, 0);
         end
 
         % Adam weight decay exactly as torch.optim.Adam applies it: added to

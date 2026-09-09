@@ -71,7 +71,7 @@ rmseAll = zeros(NREP,1);
 crpsAll = zeros(NREP,1);
 covAll  = zeros(NREP,1);
 widAll  = zeros(NREP,1);
-pitAll  = [];
+pitCell = cell(NREP,1);
 
 opts = gbcOptions( ...
     'MaxEpochs',     EPOCHS, ...
@@ -79,10 +79,27 @@ opts = gbcOptions( ...
     'LossWeights',   [0.3 0.3 0.4], ...   % smooth/heteroskedastic defaults
     'Verbose',       false);
 
-fprintf('%5s %10s %10s %10s %10s %12s\n', ...
-        'rep','RMSE','CRPS','cover90','width90','elapsed');
+% Replicates are independent fits, so they parallelise perfectly - and this is
+% the regime where that pays. Profiling (bench_gbc) shows the step at n = 106
+% is overhead-bound, not BLAS-bound: 3.6x real headroom, with BLAS reaching
+% only 198 GFLOPS against 1635 at n = 20000. That means the cores are mostly
+% idle during a small fit, so spreading replicates across them is close to
+% free. Do NOT do this for the large-n benchmarks: there BLAS already
+% saturates every core, and parfor would just split them and oversubscribe.
+%
+% parfor with a worker cap of 0 runs as an ordinary serial loop, so this is
+% correct with or without Parallel Computing Toolbox.
+if license('test','Distrib_Computing_Toolbox')
+    nWorkers = Inf;
+    fprintf('running replicates in parallel (rows will appear out of order)\n');
+else
+    nWorkers = 0;
+end
+
+fprintf('%5s %10s %10s %10s %10s\n', ...
+        'rep','RMSE','CRPS','cover90','width90');
 tStart = tic;
-for rep = 1:NREP
+parfor (rep = 1:NREP, nWorkers)
 
     rng(rep + 300);                       % split seed, per the reference
     idx  = randperm(n);
@@ -103,20 +120,15 @@ for rep = 1:NREP
     crpsAll(rep) = m.CRPS;
     covAll(rep)  = m.Coverage;
     widAll(rep)  = m.Width;
-    pitAll       = [pitAll; m.PIT]; %#ok<AGROW>
+    % Sliced output, not a growing array: concatenating inside parfor would
+    % depend on completion order.
+    pitCell{rep} = m.PIT;
 
-    el = toc(tStart);
-    fprintf('%5d %10.3f %10.3f %10.3f %10.2f %9.1f s\n', ...
-            rep, m.RMSE, m.CRPS, m.Coverage, m.Width, el);
-
-    % Project the total after the first replicate, so a long run announces
-    % its cost early instead of going quiet.
-    if rep == 1 && NREP > 1
-        fprintf('      (~%.1f s per replicate; ~%.1f min for all %d)\n', ...
-                el, el*NREP/60, NREP);
-    end
+    fprintf('%5d %10.3f %10.3f %10.3f %10.2f\n', ...
+            rep, m.RMSE, m.CRPS, m.Coverage, m.Width);
 end
 elapsed = toc(tStart);
+pitAll  = vertcat(pitCell{:});
 
 fprintf('\n--- Motorcycle, %d replicates, K = %d, %d pooled samples ---\n', ...
         NREP, K, K*BPER);

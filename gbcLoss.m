@@ -41,13 +41,24 @@ e = Y - qHat;
 lAnchor = meanAll(abs(Y - muHat));
 
 % --- term 2: quantile-ordering surrogate ----------------------------------
-% Logical masks, deliberately not cast to a numeric class: casting to single
-% here would clash with a double-precision network (as used by the finite
-% difference gradient check), since dlarray refuses to combine underlying
-% types. Logicals promote to whatever the operand is.
-isLow  = tau < 0.5;
-mTau   = isLow .* max(0, qHat - Y) + (~isLow) .* max(0, Y - qHat);
-lOrder = meanAll(abs(tau - 0.5) .* mTau);
+% Written branch-free. The masked form
+%
+%     m_tau  = max(0, q - y)  if tau <  0.5
+%              max(0, y - q)  if tau >= 0.5
+%     term   = |tau - 0.5| * m_tau
+%
+% is EXACTLY max(0, (tau - 0.5)*e) with e = y - q. For tau >= 0.5 the factor
+% (tau - 0.5) is |tau - 0.5| and max(0, c*e) = c*max(0, e); for tau < 0.5 it
+% is -|tau - 0.5|, so max(0, c*e) = |c|*max(0, -e) = |tau-0.5|*max(0, q-y).
+% At tau = 0.5 both are zero. Verified bit-identical over random inputs and
+% at the boundary cases (see t_ordering in test_gbc).
+%
+% This is not cosmetic. The masked version compared tau against a constant,
+% and a comparison is frozen at trace time: under dlaccelerate the cached
+% trace would keep the FIRST step's mask and silently apply it to every
+% later tau. Here tau enters through arithmetic only, so the trace stays
+% valid for any tau and the function is safe to accelerate.
+lOrder = meanAll(max(0, (tau - 0.5) .* e));
 
 % --- term 3: pinball / check loss -----------------------------------------
 lPinball = meanAll(max(tau .* e, (tau - 1) .* e));

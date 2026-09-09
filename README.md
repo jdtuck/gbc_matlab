@@ -143,7 +143,58 @@ in PyTorch. MATLAB's per-call `dlfeval` overhead makes it slower still, and on
 a problem this small (n = 106, d = 1) that overhead, not arithmetic, is the
 binding constraint.
 
-Three things here address that:
+### What the profiler found
+
+`bench_gbc` measures where a step actually goes. On a 20-core machine with a
+GPU, sweeping n (d = 4, hidden 256):
+
+| n | CPU step | CPU BLAS | real headroom | GPU step | GPU + accel |
+|---|---|---|---|---|---|
+| 106 | 8.10 ms | 198 GFLOPS | 3.63× | 9.66 ms | 3.01 ms |
+| 2 000 | 16.16 ms | 938 GFLOPS | 1.84× | 7.29 ms | 2.41 ms |
+| 20 000 | 54.53 ms | 1635 GFLOPS | **1.01×** | 7.33 ms | 3.22 ms |
+
+Three things fall out of this, and they decide every optimisation question
+about this code.
+
+**1. Hand-coding and MEX are dead ends at scale.** "Real headroom" is the
+measured step against what plain-array MATLAB (no `dlarray`, no tape) reaches
+for the same arithmetic. At n = 20 000 it is 1.01× — the framework costs
+one percent. A MEX file would call the same BLAS and hit the same memory
+bandwidth, so there is nothing there to win. Note the *idealised* floor, which
+assumes every flop runs at the peak GEMM rate, reports 7.9× at the same point:
+that metric would have sent someone off to write C for a 1% gain.
+
+**2. The GPU is dispatch-bound, not compute-bound.** GPU step time is flat in
+n — 7.29 ms at n = 2 000 and 7.33 ms at n = 20 000, ten times the arithmetic
+in the same wall clock. The GPU is not working hard; it is waiting on per-kernel
+launches and CPU-side tracing. That is why the GPU *loses* to the CPU at
+n = 106 and only wins 7× at n = 20 000, well short of what the hardware can do.
+
+**3. Which makes caching the trace the single biggest win.** `Accelerate`
+(now the default) cuts the step 2.7× on CPU at n = 106 and 2.3× on GPU at
+n = 20 000, computing exactly the same thing. Combined with the GPU it takes
+n = 20 000 from 54.53 ms to 3.22 ms — **17×**, with no new code.
+
+### Picking a configuration
+
+The right answer differs by regime, and the crossover is sharp:
+
+| workload | configuration | why |
+|---|---|---|
+| Small n, many fits (mcycle) | **CPU + `Accelerate` + `parfor`** | The step is overhead-bound (3.63× headroom, BLAS only 198 GFLOPS), so cores sit idle — replicates parallelise nearly free. The GPU is *slower* here. |
+| Large n (Friedman, Michalewicz) | **GPU + `Accelerate`** | BLAS already saturates all 20 cores (1635 GFLOPS), so `parfor` would only split them. The GPU wins 7×, and more as n grows. |
+
+Concretely, the motorcycle table (1.25M steps at n = 106) goes from **2.8 h**
+to **1.4 h** with `Accelerate`, and to roughly **5–7 min** once replicates run
+across 20 cores. Michalewicz at n = 90 000 projects to ~10 min per model on
+CPU against ~30–45 s on GPU.
+
+`demo_motorcycle` uses `parfor` with a worker cap, which runs as an ordinary
+serial loop when Parallel Computing Toolbox is absent, so it is correct either
+way. Rows print out of order when parallel.
+
+### Reducing the work itself
 
 - **`TauPerExample = true`** draws an independent τ for every training point,
   so a single step visits ~n levels instead of 1. On mcycle that is ~106×

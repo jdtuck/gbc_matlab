@@ -24,6 +24,8 @@ state = check(state, 'CRPS: permutation invariance',              @t_perm);
 state = check(state, 'rearrangement: never raises the check loss',@t_rearrange);
 state = check(state, 'pinball loss: minimiser is the quantile',   @t_pinball);
 state = check(state, 'ordering surrogate: correct sign per tau',  @t_ordering);
+state = check(state, 'ordering surrogate: branch-free == masked',@t_ordering_equiv);
+state = check(state, 'dlaccelerate: same result as plain',       @t_accelerate);
 state = check(state, 'loss weights: components isolate cleanly',  @t_weights);
 state = check(state, 'gradients: dlgradient vs finite differences',@t_gradcheck);
 state = check(state, 'forward pass: shapes and tau-dependence',   @t_forward);
@@ -225,6 +227,69 @@ for c = [-1 1]
     end
 end
 msg = 'sign convention matches Eq. (1)';
+end
+
+% -------------------------------------------------------------------------
+function msg = t_ordering_equiv()
+% gbcLoss ships the branch-free ordering term max(0,(tau-0.5).*e). The test
+% helper gbcLossNoGrad keeps the original masked form, so t_weights already
+% cross-checks them on a network. This checks the algebra directly, including
+% the boundary cases where the two forms could plausibly disagree: tau = 0.5
+% exactly, and e = 0.
+rng(3);
+N   = 50000;
+tau = rand(1,N);  y = randn(1,N);  q = randn(1,N);
+e   = y - q;
+
+isLow = tau < 0.5;
+mTau  = isLow.*max(0, q-y) + (~isLow).*max(0, y-q);
+old   = abs(tau - 0.5).*mTau;
+new   = max(0, (tau - 0.5).*e);
+
+d = max(abs(old - new));
+assertTrue(d == 0, 'branch-free ordering term differs by %.3g', d);
+
+[T, E] = meshgrid([0 0.25 0.5 0.75 1], [-1 -1e-12 0 1e-12 1]);
+oldB = abs(T-0.5).*((T<0.5).*max(0,-E) + (T>=0.5).*max(0,E));
+newB = max(0, (T-0.5).*E);
+dB = max(abs(oldB(:) - newB(:)));
+assertTrue(dB == 0, 'boundary cases differ by %.3g', dB);
+
+msg = sprintf('bit-identical over %d random + 25 boundary cases', N);
+end
+
+% -------------------------------------------------------------------------
+function msg = t_accelerate()
+% Acceleration must not change the answer. The failure mode it guards is
+% specific: dlaccelerate caches a traced graph, and any comparison against
+% tau inside the loss would be frozen at trace time, so every later step
+% would silently reuse the FIRST step's mask. If that regressed, the two
+% runs below would diverge badly rather than subtly.
+if isempty(which('dlaccelerate'))
+    msg = 'dlaccelerate unavailable on this release - skipped';
+    return
+end
+
+X = rand(80,2);  Y = X*[1;-1] + 0.2*randn(80,1);
+base = gbcOptions('MaxEpochs',60,'HiddenSize',32,'BottleneckSize',8, ...
+                  'Verbose',false,'Seed',9);
+
+o1 = base; o1.Accelerate = false;
+o2 = base; o2.Accelerate = true;
+
+m1 = gbcTrain(X, Y, o1);
+m2 = gbcTrain(X, Y, o2);
+
+Q1 = gbcPredict(m1, X(1:6,:), [0.1 0.5 0.9]);
+Q2 = gbcPredict(m2, X(1:6,:), [0.1 0.5 0.9]);
+
+d = max(abs(Q1(:) - Q2(:)));
+scale = max(1e-6, max(abs(Q1(:))));
+assertTrue(d/scale < 1e-4, ...
+    ['accelerated training diverged from plain by %.3g (relative %.3g) - ' ...
+     'a cached trace is being reused when it should not be'], d, d/scale);
+
+msg = sprintf('accelerated matches plain to %.1e relative', d/scale);
 end
 
 % -------------------------------------------------------------------------
