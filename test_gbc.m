@@ -37,6 +37,12 @@ state = check(state, 'gbcQuantile: one column per requested level',@t_quantile);
 state = check(state, 'coverage: grid span correction is exact',   @t_spancorrect);
 state = check(state, 'predict: column order preserved',           @t_colorder);
 state = check(state, 'train: reproducible under a fixed seed',    @t_seed);
+state = check(state, 'gbcEvalTau: per-point levels vs brute force',@t_evaltau);
+state = check(state, 'gbcSample: equals gbcEvalTau on its own taus',@t_sample_equiv);
+state = check(state, 'gbcModel: indexed draws are reproducible',   @t_model_draws);
+state = check(state, 'gbcModel: multi-point shape and orientation',@t_model_shape);
+state = check(state, 'gbcModel: predictMean vs Monte Carlo mean',  @t_model_mean);
+state = check(state, 'gbcModel: bad sample indices are rejected',  @t_model_index);
 
 if runSlow
     state = check(state, 'end-to-end: recovers analytic quantiles', @t_calibration);
@@ -702,6 +708,208 @@ assertTrue(abs(m.Coverage-0.90) < 0.05, ...
 
 msg = sprintf('max quantile err %.3f, coverage %.3f, CRPS %.3f', ...
               err, m.Coverage, m.CRPS);
+end
+
+% -------------------------------------------------------------------------
+function msg = t_evaltau()
+% gbcEvalTau tiles test points across levels inside one forward pass, so the
+% reshape is the part that can silently transpose. Check every entry of an
+% n-by-m per-point level matrix against a one-at-a-time evaluation.
+X = rand(25,2); Y = X*[1;-1] + 0.2*randn(25,1);
+model = gbcTrain(X, Y, gbcOptions('MaxEpochs',5,'HiddenSize',16, ...
+    'BottleneckSize',8,'Verbose',false,'Seed',7));
+
+Xq = rand(4,2);
+tauMat = 0.05 + 0.9*rand(4,3);           % n-by-m, a level per (point,column)
+Q = gbcEvalTau(model, Xq, tauMat);
+assertTrue(isequal(size(Q),[4 3]), 'gbcEvalTau returned %s, expected 4-by-3', ...
+    mat2str(size(Q)));
+
+% Tolerance, not equality: the batched pass and a one-column pass are the
+% same arithmetic but not the same BLAS kernel, and the network runs in single.
+scale = max(1, max(abs(Q(:))));
+e = 0;
+for i = 1:4
+    for j = 1:3
+        qij = gbcPredict(model, Xq(i,:), tauMat(i,j));
+        e = max(e, abs(Q(i,j) - qij));
+    end
+end
+assertTrue(e < 1e-4*scale, 'per-point levels misplaced (max diff %.3g)', e);
+
+% A 1-by-m row must broadcast: the same level at every point.
+tauRow = [0.2 0.8];
+Qr = gbcEvalTau(model, Xq, tauRow);
+Qg = gbcPredict(model, Xq, tauRow, false);
+assertTrue(max(abs(Qr(:)-Qg(:))) < 1e-12, 'shared-level broadcast disagrees');
+
+msg = sprintf('12 per-point levels exact to %.1e, broadcast matches', e);
+end
+
+% -------------------------------------------------------------------------
+function msg = t_sample_equiv()
+% gbcSample now builds its whole tau matrix up front and hands it to
+% gbcEvalTau. MATLAB fills arrays column-major, so that must draw the same
+% values in the same order as the old block-by-block fill; this pins it.
+X = rand(20,2); Y = sum(X,2) + 0.1*randn(20,1);
+model = gbcTrain(X, Y, gbcOptions('MaxEpochs',5,'HiddenSize',16, ...
+    'BottleneckSize',8,'Verbose',false,'Seed',2));
+
+Xq = rand(5,2);
+B  = 7;
+rng(99); S1 = gbcSample(model, Xq, B);
+rng(99); tauMat = rand(5, B, 'single');
+S2 = gbcEvalTau(model, Xq, double(tauMat));
+
+assertTrue(isequal(size(S1),[5 B]), 'gbcSample returned %s', mat2str(size(S1)));
+e = max(abs(S1(:)-S2(:)));
+assertTrue(e == 0, 'gbcSample and gbcEvalTau disagree by %.3g', e);
+
+msg = 'identical to the bit';
+end
+
+% -------------------------------------------------------------------------
+function msg = t_model_draws()
+% The calibration contract: a draw index names ONE realisation of the
+% quantile surface for the life of the object. If predict redrew tau per
+% call, a Metropolis ratio would compare two different surrogates.
+X = rand(30,2); Y = X*[1;2] + 0.2*randn(30,1);
+model = gbcTrain(X, Y, gbcOptions('MaxEpochs',5,'HiddenSize',16, ...
+    'BottleneckSize',8,'Verbose',false,'Seed',4));
+
+Xq = rand(6,2);
+p1 = model.predict(Xq, 'idxSamples', 7);
+p2 = model.predict(Xq, 'idxSamples', 7);
+assertTrue(isequal(p1,p2), 'the same draw index gave different answers');
+
+% Independent of the global stream, too: an intervening rand must not move it.
+rand(1,13);
+p3 = model.predict(Xq, 'idxSamples', 7);
+assertTrue(isequal(p1,p3), 'draws depend on the global RNG stream');
+
+% And the draw really is the network at the stored level.
+g = gbcPredict(model, Xq, model.samples(7), false);
+assertTrue(max(abs(p1(:) - g(:))) < 1e-12, ...
+    'draw 7 is not q_hat at samples(7)');
+
+% Distinct indices must give distinct draws.
+q = model.predict(Xq, 'idxSamples', 8);
+assertTrue(max(abs(p1-q)) > 1e-8, 'draws 7 and 8 are identical');
+
+% The sample set survives a round trip through setSamples with the same seed.
+m2 = model.setSamples(model.nSamples, model.sampleSeed);
+assertTrue(isequal(m2.samples, model.samples), 'setSamples is not reproducible');
+
+msg = sprintf('stable across calls and RNG state, %d draws stored', model.nSamples);
+end
+
+% -------------------------------------------------------------------------
+function msg = t_model_shape()
+% predict must accept any number of test points and return
+% numel(idxSamples)-by-nPoints: draws down the rows.
+X = rand(30,3); Y = sum(X,2) + 0.1*randn(30,1);
+model = gbcTrain(X, Y, gbcOptions('MaxEpochs',5,'HiddenSize',16, ...
+    'BottleneckSize',8,'Verbose',false,'Seed',6,'NumSamples',64));
+assertTrue(model.nSamples == 64, 'NumSamples did not reach the model');
+
+Xq = rand(9,3);
+
+P = model.predict(Xq, 'idxSamples', [2 5 9 11]);
+assertTrue(isequal(size(P),[4 9]), 'got %s, expected 4-by-9', mat2str(size(P)));
+
+one = model.predict(Xq, 'idxSamples', 5);
+assertTrue(isequal(size(one),[1 9]), 'a single draw is %s, expected 1-by-9', ...
+    mat2str(size(one)));
+% Tolerance, not isequal: a 1-column request and a 4-column request are the
+% same arithmetic through a different GEMM shape, in single precision.
+tol = 1e-4 * max(1, max(abs(P(:))));
+assertTrue(max(abs(one - P(2,:))) < tol, ...
+    'row order does not follow idxSamples');
+
+% Defaults: every stored draw. B = k is the first k.
+All = model.predict(Xq);
+assertTrue(isequal(size(All),[64 9]), 'default is %s, expected 64-by-9', ...
+    mat2str(size(All)));
+assertTrue(max(max(abs(model.predict(Xq,'B',3) - All(1:3,:)))) < tol, ...
+    'B is not 1:B');
+
+% A single test point still works, and nan is still accepted as "all".
+assertTrue(isequal(size(model.predict(Xq(1,:))),[64 1]), 'single point shape');
+assertTrue(isequal(model.predict(Xq,'idxSamples',nan), All), ...
+    'the legacy nan sentinel no longer means "all draws"');
+
+% Shared = false gives each point its own level: reproducible, but different.
+U1 = model.predict(Xq, 'idxSamples', 5, 'Shared', false);
+U2 = model.predict(Xq, 'idxSamples', 5, 'Shared', false);
+assertTrue(isequal(U1,U2), 'Shared = false is not reproducible');
+assertTrue(max(abs(U1-one)) > 1e-8, 'Shared = false matches the shared draw');
+
+msg = '4x9, 1x9, 64x9; shared and per-point both reproducible';
+end
+
+% -------------------------------------------------------------------------
+function msg = t_model_mean()
+% E[Y|x] is the integral of the quantile curve over tau, so the midpoint-rule
+% mean must agree with a large Monte Carlo average up to MC error.
+X = rand(60,1); Y = 2*X + 0.3*randn(60,1);
+model = gbcTrain(X, Y, gbcOptions('MaxEpochs',40,'HiddenSize',24, ...
+    'BottleneckSize',8,'Verbose',false,'Seed',8));
+
+Xq = [0.2; 0.5; 0.8];
+mu = model.predictMean(Xq);
+assertTrue(isequal(size(mu),[3 1]), 'predictMean is %s, expected 3-by-1', ...
+    mat2str(size(mu)));
+
+rng(17);
+B   = 20000;
+S   = gbcSample(model, Xq, B);
+se  = std(S,0,2) / sqrt(B);
+err = abs(mu - mean(S,2));
+% 5 standard errors, plus a floor so a degenerate (flat) fit cannot divide by
+% a zero spread. The midpoint rule's own bias is well under one se here.
+assertTrue(all(err <= 5*se + 1e-6), ...
+    'predictMean is %.3g off a %d-draw mean (se %.3g)', ...
+    max(err), B, max(se));
+
+msg = sprintf('max gap %.2g vs 5 se = %.2g', max(err), max(5*se));
+end
+
+% -------------------------------------------------------------------------
+function msg = t_model_index()
+% An out-of-range index used to fall through to a raw MATLAB indexing error,
+% or worse, silently select the wrong column.
+X = rand(20,2); Y = sum(X,2);
+model = gbcTrain(X, Y, gbcOptions('MaxEpochs',5,'HiddenSize',16, ...
+    'BottleneckSize',8,'Verbose',false,'Seed',9,'NumSamples',16));
+Xq = rand(3,2);
+
+bad = {model.nSamples+1, 0, -2, 1.5};
+for k = 1:numel(bad)
+    ok = false;
+    try
+        model.predict(Xq, 'idxSamples', bad{k});
+    catch
+        ok = true;
+    end
+    assertTrue(ok, 'idxSamples = %s was accepted', mat2str(bad{k}));
+end
+
+% Asking for more draws than are stored must say so, not silently truncate.
+ok = false;
+try
+    model.predict(Xq, 'B', model.nSamples + 1);
+catch err
+    ok = strcmp(err.identifier, 'gbcModel:TooFewSamples');
+end
+assertTrue(ok, 'B beyond the sample set was not reported');
+
+% A logical mask is a legitimate way to name draws.
+mask = false(1,16); mask([3 11]) = true;
+assertTrue(isequal(model.predict(Xq,'idxSamples',mask), ...
+                   model.predict(Xq,'idxSamples',[3 11])), ...
+    'a logical mask does not match the equivalent index list');
+
+msg = '4 bad indices rejected, B overrun reported, logical mask works';
 end
 
 % =========================================================================

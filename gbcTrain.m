@@ -220,7 +220,10 @@ for epoch = 1:opts.MaxEpochs
     end
 
     if hasVal && atCheckpoint
-        tmp = gbcModel(params, opts, muX, sdX, muY, sdY, d, [], []);
+        % NumSamples = 1: this throwaway is only ever asked for quantiles on
+        % a fixed grid, so there is no point drawing a whole sample set for it.
+        tmp = gbcModel(params, opts, muX, sdX, muY, sdY, d, [], [], ...
+                       'NumSamples', 1);
         valLog(nLogged) = gbcCRPS(gbcPredict(tmp, Xval, tauGridVal), Yval);
     end
 
@@ -247,6 +250,8 @@ history.lr        = lrLog(keep);
 history.valCRPS   = valLog(keep);
 history.trainTime = toc(t0);
 
+% The model arrives carrying a fixed set of opts.NumSamples tau draws, so it
+% can be handed straight to a calibration sampler; see GBCMODEL.
 model = gbcModel(params, opts, muX, sdX, muY, sdY, d, history, n);
 
 if opts.Verbose
