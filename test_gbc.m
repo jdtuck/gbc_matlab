@@ -53,6 +53,15 @@ end
 fprintf('\n=== %d passed, %d failed ===\n', state.pass, state.fail);
 results = state;
 
+% Fail loudly. The harness above catches each check's exception so that one
+% failure does not hide the rest, which also means nothing has propagated out
+% of this script - so buildtool reported "Build Successful" over a suite in
+% which 10 of 21 checks were failing. Raise here instead.
+if state.fail > 0
+    error('gbcTest:SuiteFailed', '%d of %d checks failed: %s', ...
+          state.fail, state.fail + state.pass, strjoin(state.names, '; '));
+end
+
 % =========================================================================
 % harness
 % =========================================================================
