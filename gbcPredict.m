@@ -65,41 +65,11 @@ end
 % restore the caller's column order.
 [tauSorted, order] = sort(tauGrid);
 
-nh = model.opts.NumCosine;
-n  = size(Xnew,1);
-M  = numel(tauSorted);
-onGPU = paramsOnGPU(model.params);
+n = size(Xnew,1);
+M = numel(tauSorted);
 
-Xs = (Xnew - model.muX) ./ model.sdX;
-X0 = single(Xs.');                        % d-by-n
-if onGPU, X0 = gpuArray(X0); end
-
-% Evaluate a block of quantile levels in ONE forward pass by tiling the test
-% points across levels, rather than looping over levels. The network is the
-% same for every tau, so a loop here pays MATLAB's per-call dlarray overhead
-% M times over for no reason. The block size caps peak activation memory at
-% roughly HiddenSize * maxCols singles.
-maxCols = max(1000, round(5e6 / max(1, model.opts.HiddenSize)));
-T       = max(1, min(M, floor(maxCols / max(1,n))));
-
-Qs = zeros(n, M);
-for s = 1:T:M
-    blk = s:min(s+T-1, M);
-    nb  = numel(blk);
-
-    Xrep = repmat(X0, 1, nb);                        % d-by-(n*nb)
-    tRep = repelem(single(tauSorted(blk)), n);       % 1-by-(n*nb)
-    if onGPU, tRep = gpuArray(tRep); end
-
-    Xd  = dlarray(Xrep, 'CB');
-    Phi = dlarray(quantileEmbedding(tRep, nh), 'CB');
-
-    [~, qHat] = gbcForward(model.params, Xd, Phi);
-
-    Qs(:,blk) = reshape(gather(double(extractdata(qHat))), n, nb);
-end
-
-Qs = Qs * model.sdY + model.muY;
+% One forward pass per block of levels; see GBCEVALTAU.
+Qs = gbcEvalTau(model, Xnew, tauSorted);
 
 if rearrange
     Qs = sort(Qs, 2);
@@ -107,18 +77,4 @@ end
 
 Q = zeros(n, M);
 Q(:, order) = Qs;
-end
-
-% -------------------------------------------------------------------------
-function tf = paramsOnGPU(params)
-tf = false;
-try
-    tf = isgpuarray(extractdata(params.Wx));
-catch
-    try
-        tf = isa(extractdata(params.Wx),'gpuArray');
-    catch
-        tf = false;
-    end
-end
 end

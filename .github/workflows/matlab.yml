@@ -30,6 +30,7 @@ jobs:
           release: ${{ matrix.release }}
           products: >
             Curve_Fitting_Toolbox
+            Deep_Learning_Toolbox
             Statistics_and_Machine_Learning_Toolbox
       - name: Run build
         uses: matlab-actions/run-build@v3

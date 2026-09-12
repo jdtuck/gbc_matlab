@@ -59,6 +59,16 @@ function opts = gbcOptions(varargin)
 %   -------------
 %   Standardize     Z-score inputs and response (the reference does this).
 %
+%   Surrogate sample set (calibration)
+%   ----------------------------------
+%   NumSamples      Size of the fixed tau sample set the fitted gbcModel
+%                   carries (default 500). An outer MCMC sampler indexes into
+%                   it to draw surrogate uncertainty reproducibly; see
+%                   GBCMODEL. Raise it if the chain should see more than 500
+%                   distinct surrogate realisations.
+%   SampleSeed      Seed for that sample set. [] inherits Seed, so ensemble
+%                   members get different sample sets.
+%
 %   Run control
 %   -----------
 %   ExecutionEnvironment  'auto' | 'cpu' | 'gpu'.
@@ -67,7 +77,7 @@ function opts = gbcOptions(varargin)
 %   ValidationData  {Xval,Yval} cell array, or [] for none.
 %   Seed            RNG seed, or [] to leave the global stream alone.
 %
-%   See also GBCTRAIN, GBCENSEMBLE, GBCPREDICT, GBCMETRICS.
+%   See also GBCTRAIN, GBCENSEMBLE, GBCPREDICT, GBCMODEL, GBCMETRICS.
 
 opts = struct( ...
     'HiddenSize',           256, ...
@@ -84,6 +94,8 @@ opts = struct( ...
     'GradientDecay',        0.9, ...
     'SqGradDecay',          0.999, ...
     'Standardize',          true, ...
+    'NumSamples',           500, ...
+    'SampleSeed',           [], ...
     'ExecutionEnvironment', 'auto', ...
     'Verbose',              true, ...
     'VerboseFreq',          250, ...
@@ -106,6 +118,7 @@ validateattributes(opts.HiddenSize,{'numeric'},{'scalar','positive','integer'});
 validateattributes(opts.NumCosine,{'numeric'},{'scalar','positive','integer'});
 validateattributes(opts.BottleneckSize,{'numeric'},{'scalar','nonnegative','integer'});
 validateattributes(opts.WeightDecay,{'numeric'},{'scalar','nonnegative'});
+validateattributes(opts.NumSamples,{'numeric'},{'scalar','positive','integer'});
 
 if isempty(opts.MinLR)
     opts.MinLR = 0.01 * opts.InitialLR;    % torch CosineAnnealingLR eta_min

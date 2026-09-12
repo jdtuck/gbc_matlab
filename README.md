@@ -65,6 +65,7 @@ test_gbc(true)      % plus the end-to-end calibration test
 | `gbcInit.m` | Xavier initialisation of the learnable parameters |
 | `quantileEmbedding.m` | φ(τ) = [cos(jπτ)]ⱼ₌₀^{n_h−1}, n_h = 32 |
 | `gbcForward.m` | The IQN forward pass |
+| `gbcEvalTau.m` | Batched evaluation of q̂_τ(x) at explicit (point, τ) pairs |
 | `gbcLoss.m` | The three-term composite loss, Eq. (1) |
 | `gbcTrain.m` | Algorithm 1, training phase: Adam + cosine annealing |
 | `gbcEnsemble.m` | K independent fits whose quantiles pool at test time |
@@ -72,6 +73,7 @@ test_gbc(true)      % plus the end-to-end calibration test
 | `gbcQuantile.m` | **Quantiles at the levels you asked for** — use this for plots and intervals |
 | `gbcRowQuantile.m` | numpy-compatible empirical row quantile |
 | `gbcSample.m` | Algorithm 1, test phase: τ ~ U[0,1] → predictive draws |
+| `gbcModel.m` | The fitted model object, with the **reproducible** draws a calibration chain needs |
 | `gbcCRPS.m` | CRPS, exact pairwise or the reference's permuted estimator |
 | `gbcMetricsFromSamples.m` | RMSE / CRPS / coverage / width / PIT from samples |
 | `gbcMetrics.m` | Convenience wrapper: predict, then score |
@@ -80,6 +82,44 @@ test_gbc(true)      % plus the end-to-end calibration test
 | `demos/demo_friedman10.m` | Friedman 10-D benchmark |
 | `demos/demo_jump2d.m` | Bi-mixture GP jump benchmark (BGP, d = 2) |
 | `tests/test_gbc.m` | Verification suite |
+
+## Using the surrogate inside a calibration chain
+
+`gbcTrain` returns a `gbcModel`. Handing it to an outer sampler (mvBayes,
+Impala) needs one thing the functional interface does not provide: a surrogate
+draw that **stays put** when you ask for it again.
+
+```matlab
+model = gbcTrain(X, Y, gbcOptions('NumSamples',2000));   % 2000 stored draws
+
+i  = randi(model.nSamples);                  % latent surrogate index
+yi = model.predict(Xstar, 'idxSamples', i);  % 1-by-size(Xstar,1), always the same
+```
+
+A GBC surrogate is implicit: `y = q̂_τ(x)` with `τ ~ U[0,1]`, so a single
+uniform τ **is** one draw of the surrogate. The model therefore carries a fixed
+set of `NumSamples` τ values, drawn once from a private `RandStream` seeded by
+`model.sampleSeed`, and an index into that set names one realisation of the
+quantile surface for the life of the object. That matters for two reasons:
+
+- **Validity.** If `predict` drew fresh uniforms per call, a Metropolis ratio
+  would compare two *different* surrogate realisations, and the chain would not
+  target the posterior you wrote down. With a stored set the index is an
+  ordinary latent variable: hold it, or give it its own Gibbs step.
+- **Cost.** Asking for one draw evaluates the network once per test point, not
+  `B` times and then discards `B-1` columns.
+
+`Xstar` may have any number of rows. By default a draw **shares** its τ across
+those rows, so the draw is a realisation of the quantile surface *as a
+function* and a vector-valued prediction keeps its shape instead of picking up
+independent noise at each point. Pass `'Shared', false` when the rows are
+unrelated test points rather than one output vector and you want an
+independent (still reproducible) level at each.
+
+Also on the object: `predictMean` (deterministic, the τ-integral of the
+quantile curve), `predictQuantile`, and `sample` — the last being fresh
+i.i.d. draws off the global stream, for summarising the predictive law rather
+than for use inside a chain.
 
 ## Architecture and loss
 
@@ -202,9 +242,12 @@ way. Rows print out of order when parallel.
   curve. This departs from the reference protocol — same model, same loss,
   different τ sampling — so use it for exploration and turn it off to match
   published numbers. `demo_motorcycle`'s `"fast"` preset uses it.
-- **Batched prediction.** `gbcPredict` and `gbcSample` evaluate a whole block
-  of quantile levels in one forward pass by tiling test points across levels,
-  rather than looping. Block size is capped to bound activation memory.
+- **Batched prediction.** `gbcEvalTau` evaluates a whole block of quantile
+  levels in one forward pass by tiling test points across levels, rather than
+  looping. Block size is capped to bound activation memory. `gbcPredict`,
+  `gbcSample` and `gbcModel/predict` all go through it, so they differ only in
+  where τ comes from — a caller's grid, fresh uniforms, or the model's stored
+  sample set.
 - **Cheap training loop.** Loop invariants are hoisted (in full-batch mode the
   input `dlarray` is built once, not once per step), and the loss value and
   its three-term breakdown are only extracted on epochs that get recorded —

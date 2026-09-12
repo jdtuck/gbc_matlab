@@ -46,36 +46,13 @@ if size(Xnew,2) ~= model.dIn
           model.dIn, size(Xnew,2));
 end
 
-nh    = model.opts.NumCosine;
-n     = size(Xnew,1);
-onGPU = false;
-try onGPU = isgpuarray(extractdata(model.params.Wx)); catch, end
+n = size(Xnew,1);
 
-Xs = (Xnew - model.muX) ./ model.sdX;
-X0 = single(Xs.');                        % d-by-n
-if onGPU, X0 = gpuArray(X0); end
+% An independent tau per (point, draw), exactly as Algorithm 1's test phase
+% specifies. Generating the whole matrix up front draws the same values in the
+% same order as filling it block by block - MATLAB fills column-major - and it
+% lets GBCEVALTAU own the batching of the forward pass.
+tauMat = rand(n, B, 'single');
 
-% Draws are batched the same way GBCPREDICT batches quantile levels: tile the
-% test points across draws so one forward pass yields many samples.
-maxCols = max(1000, round(5e6 / max(1, model.opts.HiddenSize)));
-T       = max(1, min(B, floor(maxCols / max(1,n))));
-
-S = zeros(n, B);
-for s = 1:T:B
-    blk = s:min(s+T-1, B);
-    nb  = numel(blk);
-
-    Xrep = repmat(X0, 1, nb);
-    tRep = rand(1, n*nb, 'single');        % independent tau per (point, draw)
-    if onGPU, tRep = gpuArray(tRep); end
-
-    Xd  = dlarray(Xrep, 'CB');
-    Phi = dlarray(quantileEmbedding(tRep, nh), 'CB');
-
-    [~, qHat] = gbcForward(model.params, Xd, Phi);
-
-    S(:,blk) = reshape(gather(double(extractdata(qHat))), n, nb);
-end
-
-S = S * model.sdY + model.muY;
+S = gbcEvalTau(model, Xnew, tauMat);
 end
