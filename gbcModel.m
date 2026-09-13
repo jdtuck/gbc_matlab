@@ -16,21 +16,21 @@ classdef gbcModel
     %   single uniform tau IS one draw of the surrogate. To let an outer
     %   sampler treat surrogate uncertainty as a latent variable - the way a
     %   GP or BASS emulator's posterior draws are treated - the model carries
-    %   a FIXED set of tau draws in obj.samples, drawn once from a private
+    %   a FIXED set of tau draws in obj.samplestau, drawn once from a private
     %   stream seeded by obj.sampleSeed. Index j of that set names one
     %   realisation of the quantile surface, for the life of the object:
     %
     %       yj = model.predict(X, 'idxSamples', j);    % always the same yj
     %
     %   That reproducibility is the point. If every call drew fresh uniforms,
-    %   a Metropolis ratio would compare two different surrogate realisations
+    %   a Metropolis ratio would compare two different surrogate realizations
     %   and the chain would not target the posterior it was written down for.
     %   It also means an index can be updated in its own Gibbs step, and that
     %   a chain can be replayed exactly from the stored seed.
     %
     %   MULTIPLE TEST POINTS. X may hold any number of rows. A draw is by
     %   default SHARED across those rows - one tau, evaluated at every point -
-    %   so a draw is a realisation of the quantile surface as a function, and
+    %   so a draw is a realization of the quantile surface as a function, and
     %   a vector-valued prediction keeps its shape rather than acquiring
     %   independent noise at each point. Pass Shared = false for an
     %   independent (still reproducible) level per point, which is what you
@@ -51,12 +51,13 @@ classdef gbcModel
         dIn             % number of predictors
         history         % training history
         numTrain        % training set size
-        samples         % 1-by-nSamples fixed tau draws in [0,1]
-        sampleSeed      % seed that generated obj.samples
+        samples         % samples container
+        samplestau      % 1-by-nSamples fixed tau draws in [0,1]
+        sampleSeed      % seed that generated obj.samplestau
     end
 
     properties (Dependent)
-        nSamples        % numel(obj.samples): the valid range of idxSamples
+        nSamples        % numel(obj.samplestau): the valid range of idxSamples
     end
 
     methods
@@ -100,10 +101,11 @@ classdef gbcModel
             seed  = firstNonEmpty(nv.SampleSeed, optField(opts,'SampleSeed'), ...
                                   optField(opts,'Seed'), 0);
             obj = obj.setSamples(nSamp, seed);
+            obj.samples.residSD = zeros(nSamp,1);
         end
 
         function n = get.nSamples(obj)
-            n = numel(obj.samples);
+            n = numel(obj.samplestau);
         end
 
         function obj = setSamples(obj, nSamples, seed)
@@ -130,7 +132,7 @@ classdef gbcModel
                 {'scalar','nonnegative','integer','finite'}, ...
                 'setSamples', 'seed');
             obj.sampleSeed = seed;
-            obj.samples    = drawTauSet(seed, nSamples);
+            obj.samplestau    = drawTauSet(seed, nSamples);
         end
 
         function pred = predict(obj, x_new, options)
@@ -163,7 +165,7 @@ classdef gbcModel
                 options.Shared (1,1) logical = true;
             end
 
-            if isempty(obj.samples)
+            if isempty(obj.samplestau)
                 error('gbcModel:NoSamples', ...
                     ['This model has no sample set; call ' ...
                      'obj = obj.setSamples(nSamples) first.']);
@@ -202,7 +204,7 @@ classdef gbcModel
             idx = reshape(idx, 1, []);
 
             if options.Shared
-                tau = obj.samples(idx);                  % 1-by-k, shared
+                tau = obj.samplestau(idx);                  % 1-by-k, shared
             else
                 tau = obj.tauPerPoint(idx, size(x_new,1));   % n-by-k
             end
