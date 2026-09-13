@@ -797,9 +797,9 @@ p3 = model.predict(Xq, 'idxSamples', 7);
 assertTrue(isequal(p1,p3), 'draws depend on the global RNG stream');
 
 % And the draw really is the network at the stored level.
-g = gbcPredict(model, Xq, model.samples(7), false);
+g = gbcPredict(model, Xq, model.samplestau(7), false);
 assertTrue(max(abs(p1(:) - g(:))) < 1e-12, ...
-    'draw 7 is not q_hat at samples(7)');
+    'draw 7 is not q_hat at samplestau(7)');
 
 % Distinct indices must give distinct draws.
 q = model.predict(Xq, 'idxSamples', 8);
@@ -807,7 +807,7 @@ assertTrue(max(abs(p1-q)) > 1e-8, 'draws 7 and 8 are identical');
 
 % The sample set survives a round trip through setSamples with the same seed.
 m2 = model.setSamples(model.nSamples, model.sampleSeed);
-assertTrue(isequal(m2.samples, model.samples), 'setSamples is not reproducible');
+assertTrue(isequal(m2.samplestau, model.samplestau), 'setSamples is not reproducible');
 
 msg = sprintf('stable across calls and RNG state, %d draws stored', model.nSamples);
 end
